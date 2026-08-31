@@ -1,0 +1,598 @@
+// Prisma Schema for Bank Reconciliation & Financial Verification Platform
+// Phase 1: Foundation & Architecture
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------
+// 1. ORGANIZATIONS & TENANCY
+// ---------------------------------------------------------
+
+model Organization {
+  id                    String                 @id @default(uuid())
+  name                  String
+  slug                  String                 @unique
+  taxId                 String?
+  baseCurrency          String                 @default("USD")
+  status                String                 @default("ACTIVE") // ACTIVE, INACTIVE, SUSPENDED
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+
+  users                 User[]
+  banks                 Bank[]
+  bankAccounts          BankAccount[]
+  bankStatements        BankStatement[]
+  bankTransactions      BankTransaction[]
+  glTransactions        GlTransaction[]
+  reconciliationPeriods ReconciliationPeriod[]
+  matchingRules         MatchingRule[]
+  toleranceConfigs      ToleranceConfig[]
+  matchingControls      MatchingControlConfig[]
+  agingConfigs          AgingBucketConfig[]
+  exceptions            ExceptionRecord[]
+  auditEvents           AuditEvent[]
+
+  @@index([status])
+}
+
+// ---------------------------------------------------------
+// 2. USERS, ROLES & PERMISSIONS (RBAC)
+// ---------------------------------------------------------
+
+model User {
+  id             String         @id @default(uuid())
+  organizationId String
+  email          String         @unique
+  fullName       String
+  passwordHash   String?
+  status         String         @default("ACTIVE") // ACTIVE, INACTIVE, LOCKED
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userRoles      UserRole[]
+
+  uploadedStatements BankStatement[]      @relation("StatementUploader")
+  preparedPeriods    ReconciliationPeriod[] @relation("PeriodPreparer")
+  reviewedPeriods    ReconciliationPeriod[] @relation("PeriodReviewer")
+  approvedPeriods    ReconciliationPeriod[] @relation("PeriodApprover")
+  assignedExceptions ExceptionRecord[]     @relation("ExceptionAssignee")
+  auditEvents        AuditEvent[]         @relation("ActorUser")
+  approvalWorkflows  ApprovalWorkflow[]   @relation("ApprovalActor")
+
+  @@index([organizationId])
+  @@index([email])
+}
+
+model Role {
+  id            String           @id @default(uuid())
+  name          String           @unique // Administrator, Accountant, Reviewer, Auditor
+  code          String           @unique // ADMIN, ACCOUNTANT, REVIEWER, AUDITOR
+  description   String
+  isSystemRole  Boolean          @default(true)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  userRoles     UserRole[]
+  permissions   RolePermission[]
+}
+
+model Permission {
+  id          String           @id @default(uuid())
+  code        String           @unique // view_dashboard, upload_statement, upload_gl, etc.
+  name        String
+  module      String           // RECONCILIATION, STATEMENTS, GL, AUDIT, ADMIN, EXCEPTIONS
+  description String
+  createdAt   DateTime         @default(now())
+
+  rolePermissions RolePermission[]
+}
+
+model RolePermission {
+  id           String     @id @default(uuid())
+  roleId       String
+  permissionId String
+
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@index([roleId])
+  @@index([permissionId])
+}
+
+model UserRole {
+  id        String   @id @default(uuid())
+  userId    String
+  roleId    String
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId])
+  @@index([userId])
+  @@index([roleId])
+}
+
+// ---------------------------------------------------------
+// 3. BANK STRUCTURE
+// ---------------------------------------------------------
+
+model Bank {
+  id             String        @id @default(uuid())
+  organizationId String
+  name           String
+  swiftCode      String?
+  routingNumber  String?
+  country        String        @default("US")
+  status         String        @default("ACTIVE")
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  accounts       BankAccount[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+}
+
+model BankAccount {
+  id             String         @id @default(uuid())
+  organizationId String
+  bankId         String
+  accountName    String
+  accountNumber  String
+  currency       String         @default("USD")
+  accountType    String         @default("CHECKING") // CHECKING, SAVINGS, OPERATING, PAYROLL, MONEY_MARKET, CLEARING
+  status         String         @default("ACTIVE")   // ACTIVE, INACTIVE, CLOSED
+  openingBalance Float          @default(0.0)
+  currentBalance Float          @default(0.0)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  bank           Bank           @relation(fields: [bankId], references: [id], onDelete: Restrict)
+  
+  statements     BankStatement[]
+  bankTransactions BankTransaction[]
+  glTransactions GlTransaction[]
+  reconciliationPeriods ReconciliationPeriod[]
+  matchingRules  MatchingRule[]
+  toleranceConfigs ToleranceConfig[]
+
+  @@unique([organizationId, bankId, accountNumber])
+  @@index([organizationId])
+  @@index([bankId])
+}
+
+// ---------------------------------------------------------
+// 4. BANK STATEMENTS & STATEMENT PAGES
+// ---------------------------------------------------------
+
+model BankStatement {
+  id                   String          @id @default(uuid())
+  organizationId       String
+  bankAccountId        String
+  statementPeriodStart DateTime
+  statementPeriodEnd   DateTime
+  originalFilename     String
+  fileType             String          // CSV, XLSX, PDF
+  storagePath          String
+  uploadedAt           DateTime        @default(now())
+  uploadedById         String
+  processingStatus     String          @default("PENDING") // PENDING, PROCESSING, COMPLETED, FAILED
+  extractionStatus     String          @default("PENDING") // PENDING, IN_PROGRESS, COMPLETED, FAILED
+  validationStatus     String          @default("PENDING") // PENDING, VALID, INVALID, WARNING
+  duplicateStatus      String          @default("NOT_CHECKED") // NOT_CHECKED, UNIQUE, POTENTIAL_DUPLICATE, CONFIRMED_DUPLICATE
+  openingBalance       Float           @default(0.0)
+  closingBalance       Float           @default(0.0)
+  totalCredits         Float           @default(0.0)
+  totalDebits          Float           @default(0.0)
+  transactionCount     Int             @default(0)
+  processingStartedAt  DateTime?
+  processingCompletedAt DateTime?
+  errors               String?         // JSON formatted error log
+  warnings             String?         // JSON formatted warning log
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+
+  organization         Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  bankAccount          BankAccount     @relation(fields: [bankAccountId], references: [id], onDelete: Cascade)
+  uploadedBy           User            @relation("StatementUploader", fields: [uploadedById], references: [id], onDelete: Restrict)
+  pages                StatementPage[]
+  transactions         BankTransaction[]
+
+  @@index([organizationId])
+  @@index([bankAccountId])
+  @@index([statementPeriodStart, statementPeriodEnd])
+  @@index([processingStatus])
+}
+
+model StatementPage {
+  id                   String          @id @default(uuid())
+  statementId          String
+  pageNumber           Int
+  extractionStatus     String          @default("PENDING") // PENDING, PROCESSING, COMPLETED, FAILED
+  ocrStatus            String          @default("NOT_REQUIRED") // NOT_REQUIRED, PENDING, COMPLETED, FAILED
+  extractionConfidence Float?
+  processingErrors     String?
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+
+  statement            BankStatement   @relation(fields: [statementId], references: [id], onDelete: Cascade)
+  transactions         BankTransaction[]
+
+  @@unique([statementId, pageNumber])
+  @@index([statementId])
+}
+
+// ---------------------------------------------------------
+// 5. TRANSACTIONS (BANK & GL)
+// ---------------------------------------------------------
+
+model BankTransaction {
+  id                     String                 @id @default(uuid())
+  organizationId         String
+  bankAccountId          String
+  statementId            String?
+  statementPageId        String?
+  transactionDate        DateTime
+  valueDate              DateTime?
+  description            String
+  narration              String?
+  referenceNumber        String?
+  chequeNumber           String?
+  accountNumber          String?
+  transactionType        String                 // DEBIT, CREDIT, TRANSFER, FEE, INTEREST, REVERSAL
+  currency               String                 @default("USD")
+  debit                  Float                  @default(0.0)
+  credit                 Float                  @default(0.0)
+  signedAmount           Float                  // Negative for debit, positive for credit
+  balance                Float?
+  sourceRow              Int?
+  sourcePage             Int?
+  originalImportedData   String                 // JSON string of exact raw source record
+  normalizedData         String?                // JSON string of normalized attributes
+  transactionFingerprint String                 // SHA-256 hash for deduplication and audit tracking
+  status                 String                 @default("UNMATCHED") // UNMATCHED, PARTIALLY_MATCHED, MATCHED, EXCLUDED
+  importTimestamp        DateTime               @default(now())
+  createdAt              DateTime               @default(now())
+  updatedAt              DateTime               @updatedAt
+
+  organization           Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  bankAccount            BankAccount            @relation(fields: [bankAccountId], references: [id], onDelete: Cascade)
+  statement              BankStatement?         @relation(fields: [statementId], references: [id], onDelete: SetNull)
+  statementPage          StatementPage?         @relation(fields: [statementPageId], references: [id], onDelete: SetNull)
+  matchItems             BankTransactionMatch[]
+  exceptions             ExceptionRecord[]
+
+  @@index([organizationId])
+  @@index([bankAccountId])
+  @@index([transactionDate])
+  @@index([transactionFingerprint])
+  @@index([status])
+}
+
+model GlTransaction {
+  id                     String               @id @default(uuid())
+  organizationId         String
+  bankAccountId          String?              // Linked bank account for reconciliation
+  transactionDate        DateTime
+  valueDate              DateTime?
+  referenceNumber        String?
+  chequeNumber           String?
+  accountNumber          String?
+  transactionType        String               // DEBIT, CREDIT, JOURNAL, ADJUSTMENT
+  currency               String               @default("USD")
+  debit                  Float                @default(0.0)
+  credit                 Float                @default(0.0)
+  amount                 Float                // Net amount
+  narration              String
+  customerSupplier       String?
+  journalNumber          String?
+  sourceSystem           String               @default("GENERAL_LEDGER") // SAP, NETSUITE, QUICKBOOKS, SAGE, MANUAL
+  sourceFile             String?
+  originalData           String               // JSON string of exact raw GL record
+  normalizedData         String?              // JSON string of normalized attributes
+  transactionFingerprint String               // SHA-256 hash for deduplication
+  status                 String               @default("UNMATCHED") // UNMATCHED, PARTIALLY_MATCHED, MATCHED, EXCLUDED
+  importTimestamp        DateTime             @default(now())
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
+
+  organization           Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  bankAccount            BankAccount?         @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+  matchItems             GlTransactionMatch[]
+  exceptions             ExceptionRecord[]
+
+  @@index([organizationId])
+  @@index([bankAccountId])
+  @@index([transactionDate])
+  @@index([transactionFingerprint])
+  @@index([status])
+}
+
+// ---------------------------------------------------------
+// 6. RECONCILIATION PERIODS & MULTI-TRANSACTION MATCHING
+// ---------------------------------------------------------
+
+model ReconciliationPeriod {
+  id             String                 @id @default(uuid())
+  organizationId String
+  bankAccountId  String
+  periodStart    DateTime
+  periodEnd      DateTime
+  status         String                 @default("NOT_STARTED") // NOT_STARTED, PROCESSING, RECONCILED, EXCEPTIONS, UNDER_REVIEW, APPROVED, CLOSED
+  isLocked       Boolean                @default(false)
+  preparedById   String?
+  reviewedById   String?
+  approvedById   String?
+  preparedAt     DateTime?
+  reviewedAt     DateTime?
+  approvedAt     DateTime?
+  closedAt       DateTime?
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+
+  organization   Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  bankAccount    BankAccount            @relation(fields: [bankAccountId], references: [id], onDelete: Cascade)
+  preparedBy     User?                  @relation("PeriodPreparer", fields: [preparedById], references: [id], onDelete: SetNull)
+  reviewedBy     User?                  @relation("PeriodReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  approvedBy     User?                  @relation("PeriodApprover", fields: [approvedById], references: [id], onDelete: SetNull)
+
+  matches        ReconciliationMatch[]
+  approvals      ApprovalWorkflow[]
+  exceptions     ExceptionRecord[]
+
+  @@unique([organizationId, bankAccountId, periodStart, periodEnd])
+  @@index([organizationId])
+  @@index([bankAccountId])
+  @@index([status])
+}
+
+model ReconciliationMatch {
+  id                     String                 @id @default(uuid())
+  reconciliationPeriodId String
+  matchType              String                 // ONE_TO_ONE, ONE_TO_MANY, MANY_TO_ONE, MANY_TO_MANY, MANUAL, ADJUSTMENT
+  matchStatus            String                 @default("PROPOSED") // PROPOSED, CONFIRMED, REJECTED, UNMATCHED
+  matchingRuleId         String?
+  confidenceScore        Float                  @default(1.0)
+  criteriaMatched        String                 // JSON string array of matched criteria codes
+  tolerancesApplied      String?                // JSON string of tolerance variances applied
+  explanation            String?
+  createdByType          String                 @default("SYSTEM") // SYSTEM, USER
+  createdById            String?
+  createdAt              DateTime               @default(now())
+  updatedAt              DateTime               @updatedAt
+
+  reconciliationPeriod   ReconciliationPeriod   @relation(fields: [reconciliationPeriodId], references: [id], onDelete: Cascade)
+  matchingRule           MatchingRule?          @relation(fields: [matchingRuleId], references: [id], onDelete: SetNull)
+  bankTransactions       BankTransactionMatch[]
+  glTransactions         GlTransactionMatch[]
+
+  @@index([reconciliationPeriodId])
+  @@index([matchingRuleId])
+  @@index([matchStatus])
+}
+
+model BankTransactionMatch {
+  id                String              @id @default(uuid())
+  matchId           String
+  bankTransactionId String
+  allocatedAmount   Float
+  createdAt         DateTime            @default(now())
+
+  match             ReconciliationMatch @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  bankTransaction   BankTransaction     @relation(fields: [bankTransactionId], references: [id], onDelete: Restrict)
+
+  @@unique([matchId, bankTransactionId])
+  @@index([matchId])
+  @@index([bankTransactionId])
+}
+
+model GlTransactionMatch {
+  id              String              @id @default(uuid())
+  matchId         String
+  glTransactionId String
+  allocatedAmount Float
+  createdAt       DateTime            @default(now())
+
+  match           ReconciliationMatch @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  glTransaction   GlTransaction       @relation(fields: [glTransactionId], references: [id], onDelete: Restrict)
+
+  @@unique([matchId, glTransactionId])
+  @@index([matchId])
+  @@index([glTransactionId])
+}
+
+// ---------------------------------------------------------
+// 7. MATCHING CRITERIA, CONTROLS, RULES & TOLERANCES
+// ---------------------------------------------------------
+
+model MatchingCriterion {
+  id                 String   @id @default(uuid())
+  code               String   @unique // AMOUNT, REFERENCE_NUMBER, CHEQUE_NUMBER, ACCOUNT_NUMBER, TRANSACTION_DATE, TRANSACTION_TYPE, CURRENCY, NARRATION, CUSTOMER_SUPPLIER
+  name               String
+  description        String
+  isStrong           Boolean  @default(false) // Strong criteria: Amount, Reference number, Cheque number, Account number
+  dataType           String   // NUMBER, STRING, DATE, ENUM
+  comparisonOperator String   @default("EQUALS") // EQUALS, WITHIN_TOLERANCE, FUZZY_MATCH, CONTAINS
+  createdAt          DateTime @default(now())
+}
+
+model MatchingControlConfig {
+  id                    String        @id @default(uuid())
+  organizationId        String?
+  minTotalCriteria      Int           @default(3) // Specification mandate: Minimum 3 total criteria
+  minStrongCriteria     Int           @default(2) // Specification mandate: Minimum 2 strong criteria
+  allowFuzzyNarration   Boolean       @default(false)
+  requireExactCurrency  Boolean       @default(true)
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  organization          Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId])
+}
+
+model MatchingRule {
+  id                 String                @id @default(uuid())
+  organizationId     String
+  bankAccountId      String?
+  name               String
+  description        String?
+  priority           Int                   @default(100) // Lower number = higher priority
+  isActive           Boolean               @default(true)
+  minTotalCriteria   Int                   @default(3)
+  minStrongCriteria  Int                   @default(2)
+  requiredCriteria   String                // JSON array of required criterion codes
+  optionalCriteria   String?               // JSON array of optional criterion codes
+  effectiveFrom      DateTime?
+  effectiveTo        DateTime?
+  createdById        String?
+  updatedById        String?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  organization       Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  bankAccount        BankAccount?          @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+  matches            ReconciliationMatch[]
+  tolerances         ToleranceConfig[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@index([bankAccountId])
+  @@index([priority])
+}
+
+model ToleranceConfig {
+  id                        String        @id @default(uuid())
+  organizationId            String
+  bankAccountId             String?
+  matchingRuleId            String?
+  level                     String        @default("ORGANIZATION") // ORGANIZATION, BANK_ACCOUNT, MATCHING_RULE
+  amountToleranceType       String        @default("FIXED") // FIXED, PERCENTAGE
+  amountToleranceValue      Float         @default(0.0) // E.g. 0.05 or 100.00
+  amountToleranceMax        Float?
+  dateToleranceDays         Int           @default(0) // E.g. 1 to 5 days difference allowed
+  isDateToleranceAllowed    Boolean       @default(false)
+  currencyRateTolerancePercent Float      @default(0.0)
+  createdById               String?
+  createdAt                 DateTime      @default(now())
+  updatedAt                 DateTime      @updatedAt
+
+  organization              Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  bankAccount               BankAccount?  @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+  matchingRule              MatchingRule? @relation(fields: [matchingRuleId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([bankAccountId])
+  @@index([matchingRuleId])
+}
+
+// ---------------------------------------------------------
+// 8. EXCEPTIONS & AGING
+// ---------------------------------------------------------
+
+model ExceptionRecord {
+  id                     String                @id @default(uuid())
+  organizationId         String
+  reconciliationPeriodId String?
+  bankTransactionId      String?
+  glTransactionId        String?
+  category               String                // TIMING_DIFFERENCE, BANK_CHARGE, BANK_INTEREST, UNKNOWN_DEPOSIT, UNKNOWN_PAYMENT, REVERSAL, DUPLICATE, MISSING_GL, MISSING_BANK_TRANSACTION, OTHER
+  status                 String                @default("OPEN") // OPEN, IN_REVIEW, RESOLVED, WAIVED, ESCALATED
+  priority               String                @default("MEDIUM") // LOW, MEDIUM, HIGH, CRITICAL
+  riskLevel              String                @default("MEDIUM") // LOW, MEDIUM, HIGH
+  assignedUserId         String?
+  description            String
+  resolution             String?
+  relevantDate           DateTime
+  resolvedDate           DateTime?
+  comments               String?               // JSON array of note entries
+  createdAt              DateTime              @default(now())
+  updatedAt              DateTime              @updatedAt
+
+  organization           Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  reconciliationPeriod   ReconciliationPeriod? @relation(fields: [reconciliationPeriodId], references: [id], onDelete: SetNull)
+  bankTransaction        BankTransaction?      @relation(fields: [bankTransactionId], references: [id], onDelete: SetNull)
+  glTransaction          GlTransaction?        @relation(fields: [glTransactionId], references: [id], onDelete: SetNull)
+  assignedUser           User?                 @relation("ExceptionAssignee", fields: [assignedUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([reconciliationPeriodId])
+  @@index([status])
+  @@index([category])
+}
+
+model AgingBucketConfig {
+  id             String        @id @default(uuid())
+  organizationId String?
+  name           String        // e.g. "0-7 days", "8-30 days", "31-60 days", "61-90 days", "90+ days"
+  minDays        Int
+  maxDays        Int?          // null indicates infinity (e.g. 90+)
+  displayOrder   Int
+  isSystemDefault Boolean      @default(true)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([displayOrder])
+}
+
+// ---------------------------------------------------------
+// 9. APPROVAL WORKFLOWS & AUDIT TRAIL
+// ---------------------------------------------------------
+
+model ApprovalWorkflow {
+  id                     String               @id @default(uuid())
+  reconciliationPeriodId String
+  stage                  String               // PREPARED, REVIEWED, APPROVED, CLOSED
+  action                 String               // SUBMIT_PREPARATION, SUBMIT_REVIEW, APPROVE, REJECT, CLOSE, REOPEN
+  status                 String               @default("PENDING") // PENDING, APPROVED, REJECTED
+  userId                 String
+  comments               String?
+  timestamp              DateTime             @default(now())
+  createdAt              DateTime             @default(now())
+
+  reconciliationPeriod   ReconciliationPeriod @relation(fields: [reconciliationPeriodId], references: [id], onDelete: Cascade)
+  user                   User                 @relation("ApprovalActor", fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([reconciliationPeriodId])
+  @@index([userId])
+}
+
+model AuditEvent {
+  id             String       @id @default(uuid())
+  organizationId String
+  actorId        String?
+  actorEmail     String?
+  actorRole      String?
+  action         String       // STATEMENT_UPLOAD, GL_IMPORT, TRANSACTION_CHANGE, MATCHING, UNMATCHING, EXCEPTION_CREATED, EXCEPTION_RESOLVED, MANUAL_ADJUSTMENT, APPROVAL, REJECTION, PERIOD_CLOSURE, PERIOD_REOPENING, CONFIG_CHANGE, USER_ROLE_CHANGE
+  entityType     String       // BankStatement, BankTransaction, GLTransaction, ReconciliationMatch, Exception, ReconciliationPeriod, MatchingRule, User, BankAccount
+  entityId       String
+  previousValue  String?      // JSON string of snapshot before mutation
+  newValue       String?      // JSON string of snapshot after mutation
+  reason         String?
+  metadata       String?      // JSON string of additional audit metadata (IP, user agent, etc.)
+  ipAddress      String?
+  userAgent      String?
+  timestamp      DateTime     @default(now())
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  actor          User?        @relation("ActorUser", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([entityType, entityId])
+  @@index([action])
+  @@index([timestamp])
+}
