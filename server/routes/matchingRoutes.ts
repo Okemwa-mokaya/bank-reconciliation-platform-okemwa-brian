@@ -136,6 +136,15 @@ matchingRouter.post('/rules', requirePermission('configure_rules'), async (req, 
     const orgId = req.organization!.id;
     const validated = CreateMatchingRuleSchema.parse(req.body);
 
+    if (validated.bankAccountId) {
+      const account = await prisma.bankAccount.findFirst({
+        where: { id: validated.bankAccountId, organizationId: orgId },
+      });
+      if (!account) {
+        return res.status(404).json({ error: 'Linked bank account not found in organization' });
+      }
+    }
+
     const rule = await prisma.matchingRule.create({
       data: {
         organizationId: orgId,
@@ -208,6 +217,24 @@ matchingRouter.post('/tolerances', requirePermission('configure_tolerances'), as
   try {
     const orgId = req.organization!.id;
     const validated = CreateToleranceSchema.parse(req.body);
+
+    if (validated.bankAccountId) {
+      const account = await prisma.bankAccount.findFirst({
+        where: { id: validated.bankAccountId, organizationId: orgId },
+      });
+      if (!account) {
+        return res.status(404).json({ error: 'Linked bank account not found in organization' });
+      }
+    }
+
+    if (validated.matchingRuleId) {
+      const rule = await prisma.matchingRule.findFirst({
+        where: { id: validated.matchingRuleId, organizationId: orgId },
+      });
+      if (!rule) {
+        return res.status(404).json({ error: 'Linked matching rule not found in organization' });
+      }
+    }
 
     const tolerance = await prisma.toleranceConfig.create({
       data: {

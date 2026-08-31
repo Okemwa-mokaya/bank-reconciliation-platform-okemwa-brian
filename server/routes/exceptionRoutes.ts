@@ -64,6 +64,36 @@ exceptionRouter.post('/', requirePermission('reconcile'), async (req, res) => {
     const orgId = req.organization!.id;
     const validated = CreateExceptionSchema.parse(req.body);
 
+    if (validated.reconciliationPeriodId) {
+      const period = await prisma.reconciliationPeriod.findFirst({
+        where: { id: validated.reconciliationPeriodId, organizationId: orgId },
+      });
+      if (!period) {
+        return res.status(404).json({ error: 'Linked reconciliation period not found in organization' });
+      }
+      if (period.isLocked || period.status === 'CLOSED') {
+        return res.status(403).json({ error: 'Cannot add exceptions to a locked or closed reconciliation period' });
+      }
+    }
+
+    if (validated.bankTransactionId) {
+      const bankTx = await prisma.bankTransaction.findFirst({
+        where: { id: validated.bankTransactionId, organizationId: orgId },
+      });
+      if (!bankTx) {
+        return res.status(404).json({ error: 'Linked bank transaction not found in organization' });
+      }
+    }
+
+    if (validated.glTransactionId) {
+      const glTx = await prisma.glTransaction.findFirst({
+        where: { id: validated.glTransactionId, organizationId: orgId },
+      });
+      if (!glTx) {
+        return res.status(404).json({ error: 'Linked GL transaction not found in organization' });
+      }
+    }
+
     const exception = await prisma.exceptionRecord.create({
       data: {
         organizationId: orgId,
@@ -114,10 +144,15 @@ exceptionRouter.patch('/:id/resolve', requirePermission('resolve_exception'), as
 
     const prev = await prisma.exceptionRecord.findFirst({
       where: { id, organizationId: orgId },
+      include: { reconciliationPeriod: true },
     });
 
     if (!prev) {
       return res.status(404).json({ error: 'Exception record not found' });
+    }
+
+    if (prev.reconciliationPeriod && (prev.reconciliationPeriod.isLocked || prev.reconciliationPeriod.status === 'CLOSED')) {
+      return res.status(403).json({ error: 'Cannot modify exceptions belonging to a locked or closed reconciliation period' });
     }
 
     const updated = await prisma.exceptionRecord.update({

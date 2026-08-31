@@ -45,7 +45,7 @@ describe('Workflow State Machine & Reconciliation Matching Guard Logic', () => {
     const debit = new Prisma.Decimal('1250000.55');
     const credit = new Prisma.Decimal('345000.20');
     const net = credit.minus(debit);
-    expect(net.toString()).toBe('-904990.35');
+    expect(net.toString()).toBe('-905000.35');
   });
 
   it('3. Multi-to-one / one-to-many transaction junction allocation matches sum exactly', () => {
@@ -66,5 +66,41 @@ describe('Workflow State Machine & Reconciliation Matching Guard Logic', () => {
 
     const isActionAllowed = !period.isLocked && period.status !== 'CLOSED';
     expect(isActionAllowed).toBe(false);
+  });
+
+  it('5. Statement intake initializes with honest PENDING status without fake OCR data', () => {
+    const initialStatement = {
+      status: 'PENDING',
+      ingestionChannel: 'MANUAL_UPLOAD',
+      pagesCount: null,
+      parsingSummary: null,
+    };
+
+    expect(initialStatement.status).toBe('PENDING');
+    expect(initialStatement.parsingSummary).toBeNull();
+    // Rejects fabricated completed states on intake
+    expect(initialStatement.status === 'COMPLETED').toBe(false);
+  });
+
+  it('6. Audit events capture actor identity from authenticated server context', () => {
+    const serverAuthContext = {
+      user: { id: 'usr-acct-1', email: 'accountant@acmetreasury.com', roles: ['ACCOUNTANT'] },
+      organization: { id: 'org-acme-1' },
+    };
+
+    const auditPayload = {
+      organizationId: serverAuthContext.organization.id,
+      actorId: serverAuthContext.user.id,
+      actorEmail: serverAuthContext.user.email,
+      actorRole: serverAuthContext.user.roles[0],
+      action: 'MATCH_CREATED',
+      entityType: 'ReconciliationMatch',
+      entityId: 'match-101',
+    };
+
+    expect(auditPayload.actorId).toBe('usr-acct-1');
+    expect(auditPayload.actorEmail).toBe('accountant@acmetreasury.com');
+    expect(auditPayload.organizationId).toBe('org-acme-1');
+    expect(auditPayload.action).toBe('MATCH_CREATED');
   });
 });

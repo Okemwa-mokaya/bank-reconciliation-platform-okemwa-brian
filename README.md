@@ -107,3 +107,22 @@ The codebase is organized into modular layers with clear boundaries:
 - Linear stage progression: `PREPARED` → `REVIEWED` → `APPROVED` → `CLOSED`.
 - Reopening closed or approved periods requires administrative privileges (`manage_users` permission).
 - Closed and locked periods strictly block new matches, unmatching, and financial edits.
+
+---
+
+## 5. Phase 1 Capabilities & Boundaries
+
+### Phase 1 Implemented Capabilities
+- **Relational Data Foundation:** PostgreSQL database schema with complete multi-tenant relational modeling.
+- **Server Authentication:** Cryptographically signed Bearer session tokens with server-verified identities and granular RBAC.
+- **Tenant Scope Enforcement:** Server-side ownership verification preventing cross-tenant leakage across transactions, bank accounts, rules, tolerances, exceptions, and audit logs.
+- **Topological Matching Model:** Data schemas supporting 1:1, 1:Many, Many:1, and Many:Many transaction junctions with allocated amounts.
+- **Criteria & Control Framework:** 9 Matching criteria (4 strong, 5 additional) with minimum 3 total / 2 strong criteria rules and multi-level tolerances.
+- **State Machine Protection:** Linear workflow state machine with locked period mutation prevention.
+- **Append-Only Audit Trail:** Server-managed audit log recording all administrative, financial, and matching operations without mutation/deletion endpoints.
+
+### Phase 1 Intentional Scope Limitations
+- **Honest Statement Intake:** Statement uploads initialize in `PENDING` status.
+- **No Phase 2 Parsing Engines:** CSV/XLSX/PDF file parsing, OCR engines, and automated extraction pipelines belong to Phase 2 and are intentionally omitted in Phase 1.
+- **No Mock Machine Learning:** No fabricated OCR confidence scores or synthetic extraction metrics are generated.
+
