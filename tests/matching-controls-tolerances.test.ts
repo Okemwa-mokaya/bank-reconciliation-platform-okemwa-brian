@@ -72,12 +72,12 @@ describe('Matching Criteria, Controls, Rules & Tolerances', () => {
     const orgTol = tolerances.find((t) => t.level === 'ORGANIZATION');
     expect(orgTol).toBeDefined();
     expect(orgTol?.amountToleranceType).toBe('FIXED');
-    expect(orgTol?.amountToleranceValue).toBe(0.05);
+    expect(Number(orgTol?.amountToleranceValue)).toBe(0.05);
     expect(orgTol?.dateToleranceDays).toBe(3);
     expect(orgTol?.isDateToleranceAllowed).toBe(true);
 
     const accTol = tolerances.find((t) => t.level === 'BANK_ACCOUNT');
     expect(accTol).toBeDefined();
-    expect(accTol?.amountToleranceValue).toBe(0.0);
+    expect(Number(accTol?.amountToleranceValue)).toBe(0.0);
   });
 });

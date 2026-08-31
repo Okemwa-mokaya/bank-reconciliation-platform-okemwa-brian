@@ -65,7 +65,7 @@ bankRouter.post('/banks', requirePermission('manage_users'), async (req, res) =>
 });
 
 // List Bank Accounts
-bankRouter.get('/accounts', requirePermission('view_dashboard'), async (req, res) => {
+const getBankAccountsHandler = async (req: any, res: any) => {
   try {
     const orgId = req.organization!.id;
     const accounts = await prisma.bankAccount.findMany({
@@ -87,10 +87,13 @@ bankRouter.get('/accounts', requirePermission('view_dashboard'), async (req, res
     console.error('Error fetching bank accounts:', error);
     res.status(500).json({ error: 'Failed to fetch bank accounts' });
   }
-});
+};
+
+bankRouter.get('/accounts', requirePermission('view_dashboard'), getBankAccountsHandler);
+bankRouter.get('/bank-accounts', requirePermission('view_dashboard'), getBankAccountsHandler);
 
 // Create Bank Account
-bankRouter.post('/accounts', requirePermission('manage_users'), async (req, res) => {
+const createBankAccountHandler = async (req: any, res: any) => {
   try {
     const orgId = req.organization!.id;
     const validated = CreateBankAccountSchema.parse(req.body);
@@ -139,4 +142,7 @@ bankRouter.post('/accounts', requirePermission('manage_users'), async (req, res)
     console.error('Error creating bank account:', error);
     res.status(500).json({ error: 'Failed to create bank account' });
   }
-});
+};
+
+bankRouter.post('/accounts', requirePermission('manage_users'), createBankAccountHandler);
+bankRouter.post('/bank-accounts', requirePermission('manage_users'), createBankAccountHandler);

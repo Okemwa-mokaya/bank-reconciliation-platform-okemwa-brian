@@ -127,11 +127,11 @@ dashboardRouter.get('/summary', requirePermission('view_dashboard'), async (req,
         reconciliationPeriodsApproved: periodsApproved,
         activeMatchingRulesCount: activeRulesCount,
         outstandingValue: {
-          bankTotal: Math.abs(bankOutstandingSum._sum.signedAmount || 0),
-          glTotal: Math.abs(glOutstandingSum._sum.amount || 0),
+          bankTotal: Math.abs(Number(bankOutstandingSum._sum.signedAmount || 0)),
+          glTotal: Math.abs(Number(glOutstandingSum._sum.amount || 0)),
           combined:
-            Math.abs(bankOutstandingSum._sum.signedAmount || 0) +
-            Math.abs(glOutstandingSum._sum.amount || 0),
+            Math.abs(Number(bankOutstandingSum._sum.signedAmount || 0)) +
+            Math.abs(Number(glOutstandingSum._sum.amount || 0)),
         },
         oldestOutstandingTransaction: {
           date: oldestOutstandingDate,

@@ -16,6 +16,18 @@ authRouter.get('/me', async (req, res) => {
   });
 });
 
+authRouter.get('/organizations', async (req, res) => {
+  try {
+    const organizations = await prisma.organization.findMany({
+      orderBy: { name: 'asc' },
+    });
+    res.json({ organizations });
+  } catch (error) {
+    console.error('Error fetching organizations:', error);
+    res.status(500).json({ error: 'Failed to fetch organizations' });
+  }
+});
+
 authRouter.get('/users', async (req, res) => {
   try {
     const orgId = req.organization?.id;

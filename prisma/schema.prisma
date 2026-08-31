@@ -152,8 +152,8 @@ model BankAccount {
   currency       String         @default("USD")
   accountType    String         @default("CHECKING") // CHECKING, SAVINGS, OPERATING, PAYROLL, MONEY_MARKET, CLEARING
   status         String         @default("ACTIVE")   // ACTIVE, INACTIVE, CLOSED
-  openingBalance Float          @default(0.0)
-  currentBalance Float          @default(0.0)
+  openingBalance Decimal        @default(0.0)
+  currentBalance Decimal        @default(0.0)
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
 
@@ -191,10 +191,10 @@ model BankStatement {
   extractionStatus     String          @default("PENDING") // PENDING, IN_PROGRESS, COMPLETED, FAILED
   validationStatus     String          @default("PENDING") // PENDING, VALID, INVALID, WARNING
   duplicateStatus      String          @default("NOT_CHECKED") // NOT_CHECKED, UNIQUE, POTENTIAL_DUPLICATE, CONFIRMED_DUPLICATE
-  openingBalance       Float           @default(0.0)
-  closingBalance       Float           @default(0.0)
-  totalCredits         Float           @default(0.0)
-  totalDebits          Float           @default(0.0)
+  openingBalance       Decimal         @default(0.0)
+  closingBalance       Decimal         @default(0.0)
+  totalCredits         Decimal         @default(0.0)
+  totalDebits          Decimal         @default(0.0)
   transactionCount     Int             @default(0)
   processingStartedAt  DateTime?
   processingCompletedAt DateTime?
@@ -221,7 +221,7 @@ model StatementPage {
   pageNumber           Int
   extractionStatus     String          @default("PENDING") // PENDING, PROCESSING, COMPLETED, FAILED
   ocrStatus            String          @default("NOT_REQUIRED") // NOT_REQUIRED, PENDING, COMPLETED, FAILED
-  extractionConfidence Float?
+  extractionConfidence Decimal?
   processingErrors     String?
   createdAt            DateTime        @default(now())
   updatedAt            DateTime        @updatedAt
@@ -252,10 +252,10 @@ model BankTransaction {
   accountNumber          String?
   transactionType        String                 // DEBIT, CREDIT, TRANSFER, FEE, INTEREST, REVERSAL
   currency               String                 @default("USD")
-  debit                  Float                  @default(0.0)
-  credit                 Float                  @default(0.0)
-  signedAmount           Float                  // Negative for debit, positive for credit
-  balance                Float?
+  debit                  Decimal                @default(0.0)
+  credit                 Decimal                @default(0.0)
+  signedAmount           Decimal                // Negative for debit, positive for credit
+  balance                Decimal?
   sourceRow              Int?
   sourcePage             Int?
   originalImportedData   String                 // JSON string of exact raw source record
@@ -291,9 +291,9 @@ model GlTransaction {
   accountNumber          String?
   transactionType        String               // DEBIT, CREDIT, JOURNAL, ADJUSTMENT
   currency               String               @default("USD")
-  debit                  Float                @default(0.0)
-  credit                 Float                @default(0.0)
-  amount                 Float                // Net amount
+  debit                  Decimal              @default(0.0)
+  credit                 Decimal              @default(0.0)
+  amount                 Decimal              // Net amount
   narration              String
   customerSupplier       String?
   journalNumber          String?
@@ -329,7 +329,7 @@ model ReconciliationPeriod {
   bankAccountId  String
   periodStart    DateTime
   periodEnd      DateTime
-  status         String                 @default("NOT_STARTED") // NOT_STARTED, PROCESSING, RECONCILED, EXCEPTIONS, UNDER_REVIEW, APPROVED, CLOSED
+  status         String                 @default("NOT_STARTED") // NOT_STARTED, PROCESSING, RECONCILED, EXCEPTIONS, PREPARED, REVIEWED, APPROVED, CLOSED
   isLocked       Boolean                @default(false)
   preparedById   String?
   reviewedById   String?
@@ -363,7 +363,7 @@ model ReconciliationMatch {
   matchType              String                 // ONE_TO_ONE, ONE_TO_MANY, MANY_TO_ONE, MANY_TO_MANY, MANUAL, ADJUSTMENT
   matchStatus            String                 @default("PROPOSED") // PROPOSED, CONFIRMED, REJECTED, UNMATCHED
   matchingRuleId         String?
-  confidenceScore        Float                  @default(1.0)
+  confidenceScore        Decimal                @default(1.0)
   criteriaMatched        String                 // JSON string array of matched criteria codes
   tolerancesApplied      String?                // JSON string of tolerance variances applied
   explanation            String?
@@ -386,7 +386,7 @@ model BankTransactionMatch {
   id                String              @id @default(uuid())
   matchId           String
   bankTransactionId String
-  allocatedAmount   Float
+  allocatedAmount   Decimal
   createdAt         DateTime            @default(now())
 
   match             ReconciliationMatch @relation(fields: [matchId], references: [id], onDelete: Cascade)
@@ -401,7 +401,7 @@ model GlTransactionMatch {
   id              String              @id @default(uuid())
   matchId         String
   glTransactionId String
-  allocatedAmount Float
+  allocatedAmount Decimal
   createdAt       DateTime            @default(now())
 
   match           ReconciliationMatch @relation(fields: [matchId], references: [id], onDelete: Cascade)
@@ -479,11 +479,11 @@ model ToleranceConfig {
   matchingRuleId            String?
   level                     String        @default("ORGANIZATION") // ORGANIZATION, BANK_ACCOUNT, MATCHING_RULE
   amountToleranceType       String        @default("FIXED") // FIXED, PERCENTAGE
-  amountToleranceValue      Float         @default(0.0) // E.g. 0.05 or 100.00
-  amountToleranceMax        Float?
+  amountToleranceValue      Decimal       @default(0.0) // E.g. 0.05 or 100.00
+  amountToleranceMax        Decimal?
   dateToleranceDays         Int           @default(0) // E.g. 1 to 5 days difference allowed
   isDateToleranceAllowed    Boolean       @default(false)
-  currencyRateTolerancePercent Float      @default(0.0)
+  currencyRateTolerancePercent Decimal    @default(0.0)
   createdById               String?
   createdAt                 DateTime      @default(now())
   updatedAt                 DateTime      @updatedAt

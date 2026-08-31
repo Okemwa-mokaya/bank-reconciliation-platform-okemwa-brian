@@ -42,8 +42,41 @@ statementRouter.get('/', requirePermission('view_dashboard'), async (req, res) =
   }
 });
 
+// Get Statement Details
+statementRouter.get('/:id', requirePermission('view_dashboard'), async (req, res) => {
+  try {
+    const orgId = req.organization!.id;
+    const { id } = req.params;
+
+    const statement = await prisma.bankStatement.findFirst({
+      where: { id, organizationId: orgId },
+      include: {
+        bankAccount: {
+          include: { bank: true },
+        },
+        uploadedBy: {
+          select: { id: true, fullName: true, email: true },
+        },
+        pages: {
+          orderBy: { pageNumber: 'asc' },
+        },
+        transactions: true,
+      },
+    });
+
+    if (!statement) {
+      return res.status(404).json({ error: 'Statement not found' });
+    }
+
+    res.json({ statement });
+  } catch (error) {
+    console.error('Error fetching statement details:', error);
+    res.status(500).json({ error: 'Failed to fetch statement details' });
+  }
+});
+
 // Create statement record (Phase 1 metadata foundation)
-statementRouter.post('/register', requirePermission('upload_statement'), async (req, res) => {
+const registerStatementHandler = async (req: any, res: any) => {
   try {
     const orgId = req.organization!.id;
     const {
@@ -137,4 +170,7 @@ statementRouter.post('/register', requirePermission('upload_statement'), async (
     console.error('Error registering statement:', error);
     res.status(500).json({ error: 'Failed to register statement record' });
   }
-});
+};
+
+statementRouter.post('/register', requirePermission('upload_statement'), registerStatementHandler);
+statementRouter.post('/', requirePermission('upload_statement'), registerStatementHandler);

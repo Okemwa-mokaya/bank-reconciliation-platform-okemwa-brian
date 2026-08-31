@@ -46,7 +46,7 @@ describe('Database Foundation & Entity Relationships', () => {
     expect(opChecking).toBeDefined();
     expect(opChecking?.bank.name).toBe('JPMorgan Chase Bank, N.A.');
     expect(opChecking?.accountType).toBe('OPERATING');
-    expect(opChecking?.openingBalance).toBe(1250000.0);
+    expect(Number(opChecking?.openingBalance)).toBe(1250000.0);
   });
 
   it('4. Creates Bank Statement and Statement Pages with OCR tracking metadata', async () => {

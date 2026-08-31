@@ -112,7 +112,7 @@ agingRouter.get('/analysis', requirePermission('view_dashboard'), async (req, re
 
         if (inBucket) {
           bankCount++;
-          bankTotalValue += Math.abs(tx.signedAmount);
+          bankTotalValue += Math.abs(Number(tx.signedAmount));
         }
       }
 
@@ -123,7 +123,7 @@ agingRouter.get('/analysis', requirePermission('view_dashboard'), async (req, re
 
         if (inBucket) {
           glCount++;
-          glTotalValue += Math.abs(tx.amount);
+          glTotalValue += Math.abs(Number(tx.amount));
         }
       }
 
@@ -150,8 +150,8 @@ agingRouter.get('/analysis', requirePermission('view_dashboard'), async (req, re
       summary: {
         totalUnmatchedBankTx: unmatchedBankTx.length,
         totalUnmatchedGLTx: unmatchedGLTx.length,
-        totalOutstandingBankValue: unmatchedBankTx.reduce((sum, tx) => sum + Math.abs(tx.signedAmount), 0),
-        totalOutstandingGLValue: unmatchedGLTx.reduce((sum, tx) => sum + Math.abs(tx.amount), 0),
+        totalOutstandingBankValue: unmatchedBankTx.reduce((sum, tx) => sum + Math.abs(Number(tx.signedAmount)), 0),
+        totalOutstandingGLValue: unmatchedGLTx.reduce((sum, tx) => sum + Math.abs(Number(tx.amount)), 0),
       },
     });
   } catch (error) {

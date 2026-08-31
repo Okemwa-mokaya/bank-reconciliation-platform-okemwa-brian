@@ -28,11 +28,16 @@ declare global {
 
 export async function authMiddleware(req: Request, res: Response, next: NextFunction) {
   try {
-    const requestedUserId = (req.headers['x-user-id'] as string) || undefined;
+    const authHeader = req.headers['authorization'];
+    const bearerUserId = authHeader?.startsWith('Bearer ') ? authHeader.substring(7).trim() : undefined;
+    const requestedUserId = (req.headers['x-user-id'] as string) || bearerUserId || undefined;
+    const requestedOrgSlug = (req.headers['x-organization-slug'] as string) || undefined;
     const requestedOrgId = (req.headers['x-organization-id'] as string) || undefined;
+    const requestedUserRole = (req.headers['x-user-role'] as string) || undefined;
 
-    let user;
+    let user = null;
 
+    // 1. Direct User ID Authentication
     if (requestedUserId) {
       user = await prisma.user.findUnique({
         where: { id: requestedUserId },
@@ -53,12 +58,96 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
           },
         },
       });
+
+      if (!user || user.status !== 'ACTIVE') {
+        return res.status(401).json({ error: 'Unauthorized: User not found or inactive' });
+      }
+
+      // Security check: If explicit organization was also requested, verify membership
+      if (requestedOrgId && user.organizationId !== requestedOrgId) {
+        return res.status(403).json({ error: 'Forbidden: User does not belong to requested organization' });
+      }
+      if (requestedOrgSlug && user.organization.slug !== requestedOrgSlug) {
+        return res.status(403).json({ error: 'Forbidden: User does not belong to requested organization' });
+      }
     }
 
-    // Default to the first active user (Sarah Jenkins - Admin) if not specified
+    // 2. Role & Org Slug Context Authentication (For UI persona selection)
+    if (!user && (requestedOrgSlug || requestedOrgId || requestedUserRole)) {
+      // Find the organization first
+      let targetOrg = null;
+      if (requestedOrgId) {
+        targetOrg = await prisma.organization.findUnique({ where: { id: requestedOrgId } });
+      } else if (requestedOrgSlug) {
+        targetOrg = await prisma.organization.findUnique({ where: { slug: requestedOrgSlug } });
+      } else {
+        targetOrg = await prisma.organization.findFirst({ orderBy: { createdAt: 'asc' } });
+      }
+
+      if (targetOrg) {
+        // Find user by role within that organization
+        if (requestedUserRole) {
+          user = await prisma.user.findFirst({
+            where: {
+              organizationId: targetOrg.id,
+              status: 'ACTIVE',
+              userRoles: {
+                some: {
+                  role: {
+                    code: requestedUserRole.toUpperCase(),
+                  },
+                },
+              },
+            },
+            include: {
+              organization: true,
+              userRoles: {
+                include: {
+                  role: {
+                    include: {
+                      permissions: {
+                        include: {
+                          permission: true,
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          });
+        }
+
+        // Fallback to any active user in that organization
+        if (!user) {
+          user = await prisma.user.findFirst({
+            where: { organizationId: targetOrg.id, status: 'ACTIVE' },
+            orderBy: { createdAt: 'asc' },
+            include: {
+              organization: true,
+              userRoles: {
+                include: {
+                  role: {
+                    include: {
+                      permissions: {
+                        include: {
+                          permission: true,
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          });
+        }
+      }
+    }
+
+    // 3. Default active administrator fallback
     if (!user) {
       user = await prisma.user.findFirst({
-        where: requestedOrgId ? { organizationId: requestedOrgId } : {},
+        where: { status: 'ACTIVE' },
         orderBy: { createdAt: 'asc' },
         include: {
           organization: true,
@@ -79,7 +168,7 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
       });
     }
 
-    if (!user || !user.organization) {
+    if (!user || !user.organization || user.status !== 'ACTIVE') {
       return res.status(401).json({ error: 'Unauthorized: No active user profile or organization found' });
     }
 
@@ -101,6 +190,7 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
       permissions: Array.from(permissionsSet),
     };
 
+    // STRICT: Tenant is always sourced from verified user's organization in database
     req.organization = {
       id: user.organization.id,
       name: user.organization.name,
