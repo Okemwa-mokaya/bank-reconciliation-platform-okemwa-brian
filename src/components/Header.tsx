@@ -1,13 +1,13 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Building2,
   ShieldCheck,
-  Activity,
   Database,
   RefreshCw,
   SlidersHorizontal,
+  UserCheck,
 } from 'lucide-react';
-import { getCurrentRole, setCurrentRole, getCurrentOrgSlug, setCurrentOrgSlug } from '../services/api';
+import { api, AuthSession, subscribeToSession } from '../services/api';
 
 interface HeaderProps {
   activeTab: string;
@@ -26,8 +26,22 @@ export const Header: React.FC<HeaderProps> = ({
   isLoading,
   systemHealthy,
 }) => {
-  const currentRole = getCurrentRole();
-  const currentOrg = getCurrentOrgSlug();
+  const [session, setSession] = useState<AuthSession | null>(null);
+  const [demoAccounts, setDemoAccounts] = useState<any[]>([]);
+
+  useEffect(() => {
+    const unsub = subscribeToSession((newSession) => {
+      setSession(newSession);
+    });
+
+    api.getDemoAccounts().then((res) => {
+      if (res && res.accounts) {
+        setDemoAccounts(res.accounts);
+      }
+    }).catch(console.error);
+
+    return unsub;
+  }, []);
 
   const navItems = [
     { id: 'dashboard', label: 'Executive Dashboard' },
@@ -40,15 +54,20 @@ export const Header: React.FC<HeaderProps> = ({
     { id: 'audit-log', label: 'Audit Trail' },
   ];
 
-  const handleRoleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    setCurrentRole(e.target.value);
-    onRefresh();
+  const handleAccountChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const selectedEmail = e.target.value;
+    try {
+      await api.login(selectedEmail);
+      onRefresh();
+    } catch (err) {
+      console.error('Failed to authenticate as selected user:', err);
+    }
   };
 
-  const handleOrgChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    setCurrentOrgSlug(e.target.value);
-    onRefresh();
-  };
+  const currentEmail = session?.user?.email || 'admin@acmetreasury.com';
+  const currentOrgName = session?.organization?.name || 'Acme Global Treasury Corp';
+  const currentOrgCurrency = session?.organization?.baseCurrency || 'USD';
+  const currentRole = session?.user?.roles?.[0] || 'ADMIN';
 
   return (
     <header className="border-b border-stone-200 bg-white sticky top-0 z-30 shadow-xs">
@@ -66,44 +85,50 @@ export const Header: React.FC<HeaderProps> = ({
                   VERIFIN
                 </span>
                 <span className="text-xs font-semibold px-2 py-0.5 rounded bg-stone-100 text-stone-700 border border-stone-200">
-                  PHASE 1 ARCHITECTURE
+                  POSTGRESQL HARDENED
                 </span>
               </div>
               <p className="text-xs text-stone-500 font-medium">
-                Bank Reconciliation & Financial Verification Engine
+                Bank Reconciliation & Financial Verification Platform
               </p>
             </div>
           </div>
 
-          {/* Institutional Context Selectors (Multi-Tenant & RBAC simulation) */}
-          <div className="flex items-center space-x-4">
-            {/* Organization Context */}
+          {/* Institutional Context & Server-Verified Authentication */}
+          <div className="flex items-center space-x-3">
+            {/* Authenticated Tenant Entity Badge */}
             <div className="flex items-center space-x-2 text-xs bg-stone-50 border border-stone-200 rounded-md px-2.5 py-1.5">
               <Building2 className="w-4 h-4 text-stone-500" />
-              <span className="text-stone-500 font-medium hidden sm:inline">Entity:</span>
-              <select
-                value={currentOrg}
-                onChange={handleOrgChange}
-                className="bg-transparent font-medium text-stone-800 focus:outline-none cursor-pointer"
-              >
-                <option value="acme-treasury">Acme Global Treasury Corp (USD)</option>
-                <option value="apex-holdings">Apex European Holdings (EUR)</option>
-              </select>
+              <span className="text-stone-500 font-medium hidden sm:inline">Tenant:</span>
+              <span className="font-semibold text-stone-800">
+                {currentOrgName} ({currentOrgCurrency})
+              </span>
             </div>
 
-            {/* Role Context (RBAC demonstration) */}
+            {/* Authenticated User & Role Selector (Server Bearer Token Auth) */}
             <div className="flex items-center space-x-2 text-xs bg-amber-50/60 border border-amber-200/80 rounded-md px-2.5 py-1.5">
-              <SlidersHorizontal className="w-4 h-4 text-amber-700" />
-              <span className="text-amber-800 font-medium hidden sm:inline">RBAC Role:</span>
+              <UserCheck className="w-4 h-4 text-amber-700" />
+              <span className="text-amber-800 font-medium hidden sm:inline">User Account:</span>
               <select
-                value={currentRole}
-                onChange={handleRoleChange}
+                value={currentEmail}
+                onChange={handleAccountChange}
                 className="bg-transparent font-semibold text-amber-900 focus:outline-none cursor-pointer"
               >
-                <option value="ADMIN">Administrator (Full Access)</option>
-                <option value="ACCOUNTANT">Accountant (Operational)</option>
-                <option value="REVIEWER">Reviewer (Approvals)</option>
-                <option value="AUDITOR">Auditor (Read-Only Compliance)</option>
+                {demoAccounts.length > 0 ? (
+                  demoAccounts.map((acc) => (
+                    <option key={acc.email} value={acc.email}>
+                      {acc.fullName} ({acc.role} - {acc.orgName})
+                    </option>
+                  ))
+                ) : (
+                  <>
+                    <option value="admin@acmetreasury.com">Arthur Vance (ADMIN - Acme)</option>
+                    <option value="accountant@acmetreasury.com">Beatrice Lin (ACCOUNTANT - Acme)</option>
+                    <option value="reviewer@acmetreasury.com">Charles Montgomery (REVIEWER - Acme)</option>
+                    <option value="auditor@acmetreasury.com">Diana Prince (AUDITOR - Acme)</option>
+                    <option value="apex.admin@apexholdings.eu">Elena Rostova (ADMIN - Apex EUR)</option>
+                  </>
+                )}
               </select>
             </div>
 

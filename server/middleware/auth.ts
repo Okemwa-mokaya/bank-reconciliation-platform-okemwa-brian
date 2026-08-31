@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { prisma } from '../db';
+import { verifySessionToken } from '../services/authService';
 
 export interface AuthenticatedUser {
   id: string;
@@ -26,152 +27,77 @@ declare global {
   }
 }
 
+// Routes that do not require authentication
+const PUBLIC_PATHS = [
+  '/api/auth/login',
+  '/api/auth/demo-accounts',
+  '/api/system/health',
+  '/api/health',
+];
+
 export async function authMiddleware(req: Request, res: Response, next: NextFunction) {
   try {
+    // 1. Allow public endpoints without authentication
+    const path = req.path;
+    if (PUBLIC_PATHS.some((p) => path.startsWith(p))) {
+      return next();
+    }
+
+    // 2. Strict Bearer Token extraction
     const authHeader = req.headers['authorization'];
-    const bearerUserId = authHeader?.startsWith('Bearer ') ? authHeader.substring(7).trim() : undefined;
-    const requestedUserId = (req.headers['x-user-id'] as string) || bearerUserId || undefined;
-    const requestedOrgSlug = (req.headers['x-organization-slug'] as string) || undefined;
-    const requestedOrgId = (req.headers['x-organization-id'] as string) || undefined;
-    const requestedUserRole = (req.headers['x-user-role'] as string) || undefined;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        error: 'Unauthorized: Authentication required. Provide Authorization Bearer token.',
+        code: 'AUTH_REQUIRED',
+      });
+    }
 
-    let user = null;
+    const token = authHeader.substring(7).trim();
+    if (!token) {
+      return res.status(401).json({
+        error: 'Unauthorized: Empty Bearer token provided.',
+        code: 'INVALID_TOKEN',
+      });
+    }
 
-    // 1. Direct User ID Authentication
-    if (requestedUserId) {
-      user = await prisma.user.findUnique({
-        where: { id: requestedUserId },
-        include: {
-          organization: true,
-          userRoles: {
-            include: {
-              role: {
-                include: {
-                  permissions: {
-                    include: {
-                      permission: true,
-                    },
+    // 3. Server-authoritative token verification
+    const session = verifySessionToken(token);
+    if (!session) {
+      return res.status(401).json({
+        error: 'Unauthorized: Invalid or expired session token. Please log in again.',
+        code: 'SESSION_EXPIRED',
+      });
+    }
+
+    // 4. Fetch authenticated user from database
+    const user = await prisma.user.findUnique({
+      where: { id: session.userId },
+      include: {
+        organization: true,
+        userRoles: {
+          include: {
+            role: {
+              include: {
+                permissions: {
+                  include: {
+                    permission: true,
                   },
                 },
               },
             },
           },
         },
-      });
+      },
+    });
 
-      if (!user || user.status !== 'ACTIVE') {
-        return res.status(401).json({ error: 'Unauthorized: User not found or inactive' });
-      }
-
-      // Security check: If explicit organization was also requested, verify membership
-      if (requestedOrgId && user.organizationId !== requestedOrgId) {
-        return res.status(403).json({ error: 'Forbidden: User does not belong to requested organization' });
-      }
-      if (requestedOrgSlug && user.organization.slug !== requestedOrgSlug) {
-        return res.status(403).json({ error: 'Forbidden: User does not belong to requested organization' });
-      }
-    }
-
-    // 2. Role & Org Slug Context Authentication (For UI persona selection)
-    if (!user && (requestedOrgSlug || requestedOrgId || requestedUserRole)) {
-      // Find the organization first
-      let targetOrg = null;
-      if (requestedOrgId) {
-        targetOrg = await prisma.organization.findUnique({ where: { id: requestedOrgId } });
-      } else if (requestedOrgSlug) {
-        targetOrg = await prisma.organization.findUnique({ where: { slug: requestedOrgSlug } });
-      } else {
-        targetOrg = await prisma.organization.findFirst({ orderBy: { createdAt: 'asc' } });
-      }
-
-      if (targetOrg) {
-        // Find user by role within that organization
-        if (requestedUserRole) {
-          user = await prisma.user.findFirst({
-            where: {
-              organizationId: targetOrg.id,
-              status: 'ACTIVE',
-              userRoles: {
-                some: {
-                  role: {
-                    code: requestedUserRole.toUpperCase(),
-                  },
-                },
-              },
-            },
-            include: {
-              organization: true,
-              userRoles: {
-                include: {
-                  role: {
-                    include: {
-                      permissions: {
-                        include: {
-                          permission: true,
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          });
-        }
-
-        // Fallback to any active user in that organization
-        if (!user) {
-          user = await prisma.user.findFirst({
-            where: { organizationId: targetOrg.id, status: 'ACTIVE' },
-            orderBy: { createdAt: 'asc' },
-            include: {
-              organization: true,
-              userRoles: {
-                include: {
-                  role: {
-                    include: {
-                      permissions: {
-                        include: {
-                          permission: true,
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          });
-        }
-      }
-    }
-
-    // 3. Default active administrator fallback
-    if (!user) {
-      user = await prisma.user.findFirst({
-        where: { status: 'ACTIVE' },
-        orderBy: { createdAt: 'asc' },
-        include: {
-          organization: true,
-          userRoles: {
-            include: {
-              role: {
-                include: {
-                  permissions: {
-                    include: {
-                      permission: true,
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
+    if (!user || user.status !== 'ACTIVE' || !user.organization || user.organization.status !== 'ACTIVE') {
+      return res.status(401).json({
+        error: 'Unauthorized: User account is inactive, suspended, or not found.',
+        code: 'USER_INACTIVE',
       });
     }
 
-    if (!user || !user.organization || user.status !== 'ACTIVE') {
-      return res.status(401).json({ error: 'Unauthorized: No active user profile or organization found' });
-    }
-
+    // 5. Build server-verified roles & permissions
     const roles: string[] = user.userRoles.map((ur) => ur.role.code);
     const permissionsSet = new Set<string>();
 
@@ -190,7 +116,7 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
       permissions: Array.from(permissionsSet),
     };
 
-    // STRICT: Tenant is always sourced from verified user's organization in database
+    // 6. STRICT: Tenant isolation is derived solely from the server-verified database record
     req.organization = {
       id: user.organization.id,
       name: user.organization.name,
@@ -201,6 +127,6 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
     next();
   } catch (error) {
     console.error('Auth middleware failure:', error);
-    res.status(500).json({ error: 'Internal authentication error' });
+    res.status(500).json({ error: 'Internal server error during authentication' });
   }
 }

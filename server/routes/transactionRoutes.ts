@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { prisma } from '../db';
 import { requirePermission } from '../middleware/rbac';
 import { recordAuditEvent } from '../services/auditService';
+import { Prisma } from '@prisma/client';
 import crypto from 'crypto';
 
 export const transactionRouter = Router();
@@ -85,7 +86,7 @@ transactionRouter.get('/gl', requirePermission('view_transactions'), async (req,
   }
 });
 
-// Create Bank Transaction entry (Preserves raw source record intact)
+// Create Bank Transaction entry (Preserves raw source record intact with Decimal precision)
 transactionRouter.post('/bank', requirePermission('upload_statement'), async (req, res) => {
   try {
     const orgId = req.organization!.id;
@@ -112,10 +113,22 @@ transactionRouter.post('/bank', requirePermission('upload_statement'), async (re
       return res.status(400).json({ error: 'Missing required bank transaction fields' });
     }
 
-    const calcSignedAmount = signedAmount !== undefined ? Number(signedAmount) : Number(credit) - Number(debit);
+    // Verify bank account ownership
+    const account = await prisma.bankAccount.findFirst({
+      where: { id: bankAccountId, organizationId: orgId },
+    });
+    if (!account) {
+      return res.status(404).json({ error: 'Bank account not found' });
+    }
+
+    const debitDecimal = new Prisma.Decimal(debit);
+    const creditDecimal = new Prisma.Decimal(credit);
+    const calcSignedDecimal = signedAmount !== undefined
+      ? new Prisma.Decimal(signedAmount)
+      : creditDecimal.minus(debitDecimal);
 
     // Compute cryptographic fingerprint for deduplication
-    const fingerprintStr = `${orgId}-${bankAccountId}-${transactionDate}-${referenceNumber || ''}-${chequeNumber || ''}-${calcSignedAmount}-${description}`;
+    const fingerprintStr = `${orgId}-${bankAccountId}-${transactionDate}-${referenceNumber || ''}-${chequeNumber || ''}-${calcSignedDecimal.toString()}-${description}`;
     const transactionFingerprint = crypto.createHash('sha256').update(fingerprintStr).digest('hex');
 
     const transaction = await prisma.bankTransaction.create({
@@ -132,10 +145,10 @@ transactionRouter.post('/bank', requirePermission('upload_statement'), async (re
         accountNumber: accountNumber || null,
         transactionType,
         currency,
-        debit: Number(debit),
-        credit: Number(credit),
-        signedAmount: calcSignedAmount,
-        balance: balance !== undefined ? Number(balance) : null,
+        debit: debitDecimal,
+        credit: creditDecimal,
+        signedAmount: calcSignedDecimal,
+        balance: balance !== undefined ? new Prisma.Decimal(balance) : null,
         originalImportedData: JSON.stringify(rawSourceData || { description, debit, credit, transactionDate }),
         normalizedData: JSON.stringify({ description: description.trim().toUpperCase(), referenceNumber }),
         transactionFingerprint,
@@ -151,7 +164,7 @@ transactionRouter.post('/bank', requirePermission('upload_statement'), async (re
       action: 'BANK_TRANSACTION_CREATED',
       entityType: 'BankTransaction',
       entityId: transaction.id,
-      newValue: { id: transaction.id, description, amount: calcSignedAmount },
+      newValue: { id: transaction.id, description, amount: calcSignedDecimal.toString() },
       reason: 'Bank transaction record created',
     });
 
@@ -189,9 +202,22 @@ transactionRouter.post('/gl', requirePermission('upload_gl'), async (req, res) =
       return res.status(400).json({ error: 'Missing required GL transaction fields' });
     }
 
-    const calcAmount = amount !== undefined ? Number(amount) : Number(debit) - Number(credit);
+    if (bankAccountId) {
+      const account = await prisma.bankAccount.findFirst({
+        where: { id: bankAccountId, organizationId: orgId },
+      });
+      if (!account) {
+        return res.status(404).json({ error: 'Linked bank account not found' });
+      }
+    }
 
-    const fingerprintStr = `${orgId}-${bankAccountId || 'global'}-${transactionDate}-${journalNumber || ''}-${referenceNumber || ''}-${calcAmount}-${narration}`;
+    const debitDecimal = new Prisma.Decimal(debit);
+    const creditDecimal = new Prisma.Decimal(credit);
+    const calcAmountDecimal = amount !== undefined
+      ? new Prisma.Decimal(amount)
+      : debitDecimal.minus(creditDecimal);
+
+    const fingerprintStr = `${orgId}-${bankAccountId || 'global'}-${transactionDate}-${journalNumber || ''}-${referenceNumber || ''}-${calcAmountDecimal.toString()}-${narration}`;
     const transactionFingerprint = crypto.createHash('sha256').update(fingerprintStr).digest('hex');
 
     const transaction = await prisma.glTransaction.create({
@@ -205,9 +231,9 @@ transactionRouter.post('/gl', requirePermission('upload_gl'), async (req, res) =
         accountNumber: accountNumber || null,
         transactionType,
         currency,
-        debit: Number(debit),
-        credit: Number(credit),
-        amount: calcAmount,
+        debit: debitDecimal,
+        credit: creditDecimal,
+        amount: calcAmountDecimal,
         narration,
         customerSupplier: customerSupplier || null,
         journalNumber: journalNumber || null,
@@ -227,7 +253,7 @@ transactionRouter.post('/gl', requirePermission('upload_gl'), async (req, res) =
       action: 'GL_TRANSACTION_CREATED',
       entityType: 'GLTransaction',
       entityId: transaction.id,
-      newValue: { id: transaction.id, narration, amount: calcAmount },
+      newValue: { id: transaction.id, narration, amount: calcAmountDecimal.toString() },
       reason: 'General Ledger transaction record registered',
     });
 

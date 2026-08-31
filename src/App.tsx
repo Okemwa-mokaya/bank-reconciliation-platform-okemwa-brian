@@ -54,6 +54,11 @@ export default function App() {
   const loadAllData = useCallback(async () => {
     setIsLoading(true);
     try {
+      if (!api.getCurrentUser) {
+        // safety check
+      }
+      await api.restoreSession();
+
       // 1. Dashboard & Banks
       const [dashRes, banksRes, accRes] = await Promise.all([
         api.getDashboardSummary(),

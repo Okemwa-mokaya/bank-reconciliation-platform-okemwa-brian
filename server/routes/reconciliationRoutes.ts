@@ -596,27 +596,25 @@ const submitApprovalHandler = async (req: any, res: any) => {
       const allowedPrior = ['NOT_STARTED', 'PROCESSING', 'RECONCILED', 'EXCEPTIONS'];
       if (!allowedPrior.includes(period.status)) {
         return res.status(400).json({
-          error: `Invalid state transition: Cannot prepare period from status ${period.status}`,
+          error: `Invalid state transition: Cannot prepare period from status ${period.status}. Expected one of: ${allowedPrior.join(', ')}`,
         });
       }
       nextStatus = 'PREPARED';
       updateData.preparedById = req.user?.id;
       updateData.preparedAt = new Date();
     } else if (validated.action === 'SUBMIT_REVIEW') {
-      const allowedPrior = ['PREPARED', 'PROCESSING', 'RECONCILED'];
-      if (!allowedPrior.includes(period.status)) {
+      if (period.status !== 'PREPARED') {
         return res.status(400).json({
-          error: `Invalid state transition: Cannot submit review from status ${period.status}. Period must be PREPARED first.`,
+          error: `Invalid state transition: Cannot submit review from status ${period.status}. Period must be in PREPARED status first.`,
         });
       }
       nextStatus = 'REVIEWED';
       updateData.reviewedById = req.user?.id;
       updateData.reviewedAt = new Date();
     } else if (validated.action === 'APPROVE') {
-      const allowedPrior = ['REVIEWED', 'PREPARED'];
-      if (!allowedPrior.includes(period.status)) {
+      if (period.status !== 'REVIEWED') {
         return res.status(400).json({
-          error: `Invalid state transition: Cannot approve period from status ${period.status}. Period must be REVIEWED or PREPARED.`,
+          error: `Invalid state transition: Cannot approve period from status ${period.status}. Period must be in REVIEWED status first.`,
         });
       }
       nextStatus = 'APPROVED';
@@ -632,15 +630,21 @@ const submitApprovalHandler = async (req: any, res: any) => {
       isLocked = true;
       updateData.closedAt = new Date();
     } else if (validated.action === 'REOPEN') {
+      if (!req.user?.permissions.includes('manage_users') && !req.user?.roles.includes('ADMIN')) {
+        return res.status(403).json({
+          error: 'Forbidden: Only administrators with manage_users permission can reopen locked or approved periods.',
+        });
+      }
       if (!['CLOSED', 'APPROVED'].includes(period.status)) {
         return res.status(400).json({
-          error: `Invalid state transition: Cannot reopen period with status ${period.status}`,
+          error: `Invalid state transition: Cannot reopen period with status ${period.status}. Expected CLOSED or APPROVED.`,
         });
       }
       nextStatus = 'PROCESSING';
       isLocked = false;
     } else if (validated.action === 'REJECT') {
       nextStatus = 'EXCEPTIONS';
+      isLocked = false;
     } else {
       return res.status(400).json({ error: `Unknown workflow action: ${validated.action}` });
     }

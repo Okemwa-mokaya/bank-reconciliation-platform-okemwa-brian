@@ -9,8 +9,9 @@
     "start": "node dist/server.cjs",
     "test": "vitest run",
     "lint": "tsc --noEmit",
-    "prisma:generate": "DATABASE_URL=file:./dev.db prisma generate",
-    "prisma:push": "DATABASE_URL=file:./dev.db prisma db push",
+    "prisma:generate": "prisma generate",
+    "prisma:push": "prisma db push",
+    "prisma:migrate": "prisma migrate deploy",
     "prisma:seed": "tsx server/seed.ts"
   },
   "dependencies": {

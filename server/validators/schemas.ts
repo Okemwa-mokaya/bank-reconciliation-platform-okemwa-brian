@@ -20,7 +20,7 @@ export const CreateBankAccountSchema = z.object({
   accountNumber: z.string().min(3, 'Account number is required'),
   currency: z.string().length(3, 'Currency must be a 3-letter ISO code').default('USD'),
   accountType: z.enum(['CHECKING', 'SAVINGS', 'OPERATING', 'PAYROLL', 'MONEY_MARKET', 'CLEARING']).default('CHECKING'),
-  openingBalance: z.number().default(0.0),
+  openingBalance: z.union([z.number(), z.string()]).default(0.0),
 });
 
 export const CreateMatchingRuleSchema = z.object({

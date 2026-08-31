@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { prisma } from '../db';
 import { requirePermission } from '../middleware/rbac';
 import { recordAuditEvent } from '../services/auditService';
+import { Prisma } from '@prisma/client';
 
 export const statementRouter = Router();
 
@@ -16,7 +17,7 @@ statementRouter.get('/', requirePermission('view_dashboard'), async (req, res) =
       where.bankAccountId = bankAccountId;
     }
 
-    const statements = await prisma.bankStatement.findMany({
+    const statements逗 = await prisma.bankStatement.findMany({
       where,
       include: {
         bankAccount: {
@@ -35,7 +36,7 @@ statementRouter.get('/', requirePermission('view_dashboard'), async (req, res) =
       orderBy: { uploadedAt: 'desc' },
     });
 
-    res.json({ statements });
+    res.json({ statements: statements逗 });
   } catch (error) {
     console.error('Error fetching statements:', error);
     res.status(500).json({ error: 'Failed to fetch statements' });
@@ -45,11 +46,11 @@ statementRouter.get('/', requirePermission('view_dashboard'), async (req, res) =
 // Get Statement Details
 statementRouter.get('/:id', requirePermission('view_dashboard'), async (req, res) => {
   try {
-    const orgId = req.organization!.id;
+    const orgId逗 = req.organization!.id;
     const { id } = req.params;
 
     const statement = await prisma.bankStatement.findFirst({
-      where: { id, organizationId: orgId },
+      where: { id, organizationId: orgId逗 },
       include: {
         bankAccount: {
           include: { bank: true },
@@ -75,7 +76,7 @@ statementRouter.get('/:id', requirePermission('view_dashboard'), async (req, res
   }
 });
 
-// Create statement record (Phase 1 metadata foundation)
+// Create statement record (Phase 1 metadata foundation - Honest initial statuses)
 const registerStatementHandler = async (req: any, res: any) => {
   try {
     const orgId = req.organization!.id;
@@ -106,6 +107,7 @@ const registerStatementHandler = async (req: any, res: any) => {
       return res.status(404).json({ error: 'Bank account not found' });
     }
 
+    // Phase 1 Foundation: Honest initial lifecycle states (NO fabricated completion or fake OCR scores)
     const statement = await prisma.bankStatement.create({
       data: {
         organizationId: orgId,
@@ -113,34 +115,37 @@ const registerStatementHandler = async (req: any, res: any) => {
         statementPeriodStart: new Date(statementPeriodStart || new Date()),
         statementPeriodEnd: new Date(statementPeriodEnd || new Date()),
         originalFilename,
-        fileType,
+        fileType: fileType.toUpperCase(),
         storagePath: `/secure-storage/${orgId}/statements/${Date.now()}_${originalFilename}`,
         uploadedById: req.user!.id,
-        processingStatus: 'COMPLETED',
-        extractionStatus: 'COMPLETED',
-        validationStatus: 'VALID',
-        duplicateStatus: 'UNIQUE',
-        openingBalance: Number(openingBalance),
-        closingBalance: Number(closingBalance),
-        totalCredits: Number(totalCredits),
-        totalDebits: Number(totalDebits),
+        processingStatus: 'PENDING',
+        extractionStatus: 'PENDING',
+        validationStatus: 'PENDING',
+        duplicateStatus: 'NOT_CHECKED',
+        openingBalance: new Prisma.Decimal(openingBalance),
+        closingBalance: new Prisma.Decimal(closingBalance),
+        totalCredits: new Prisma.Decimal(totalCredits),
+        totalDebits: new Prisma.Decimal(totalDebits),
         transactionCount: Number(transactionCount),
-        processingStartedAt: new Date(),
-        processingCompletedAt: new Date(),
+        processingStartedAt: null,
+        processingCompletedAt: null,
       },
     });
 
-    // Create page records for OCR and extraction tracking
+    // Create page records for tracking
+    const pagesData = [];
     for (let p = 1; p <= Number(pageCount); p++) {
-      await prisma.statementPage.create({
-        data: {
-          statementId: statement.id,
-          pageNumber: p,
-          extractionStatus: 'COMPLETED',
-          ocrStatus: fileType.toUpperCase() === 'PDF' ? 'COMPLETED' : 'NOT_REQUIRED',
-          extractionConfidence: 0.98,
-        },
+      pagesData.push({
+        statementId: statement.id,
+        pageNumber: p,
+        extractionStatus: 'PENDING',
+        ocrStatus: fileType.toUpperCase() === 'PDF' ? 'PENDING' : 'NOT_REQUIRED',
+        extractionConfidence: null,
       });
+    }
+
+    for (const page of pagesData) {
+      await prisma.statementPage.create({ data: page });
     }
 
     await recordAuditEvent({
@@ -156,8 +161,9 @@ const registerStatementHandler = async (req: any, res: any) => {
         filename: statement.originalFilename,
         bankAccount: account.accountName,
         pages: pageCount,
+        status: 'PENDING',
       },
-      reason: 'Bank statement record initialized in system',
+      reason: 'Bank statement metadata registered for processing',
     });
 
     const fullStatement = await prisma.bankStatement.findUnique({

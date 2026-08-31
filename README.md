@@ -1,5 +1,5 @@
 # Bank Reconciliation & Financial Verification Platform (VERIFIN)
-**Phase 1: Foundation & Architecture**
+**Phase 1: Foundation & Architecture (Hardened)**
 
 ---
 
@@ -8,27 +8,29 @@
 The **Bank Reconciliation & Financial Verification Platform** is an enterprise-grade financial integrity system designed to automate, match, verify, and audit complex multi-entity bank transactions against General Ledger (GL) cash records.
 
 This implementation delivers the complete **Phase 1: Foundation & Architecture**, establishing:
-- A fully normalized, relational financial database schema supporting multi-tenant isolation.
-- Institutional banking hierarchy (Entities, Banks, Bank Accounts, Statements, Statement Pages).
-- Dual transaction ingestion foundations (Bank Feed and GL Journals) preserving original raw data payloads intact for non-repudiation.
-- Topological multi-item matching data models (supporting 1:1, 1:Many, Many:1, and Many:Many match structures).
-- 9 Matching Criteria with Strong (Amount, Reference#, Cheque#, Account#) vs. Additional (Date, Type, Currency, Narration, Counterparty) classification.
-- Configurable Matching Controls (Default policy: Minimum 3 total criteria, minimum 2 strong criteria).
-- Multi-tiered Amount and Date Tolerances (Organization, Account, and Rule scopes).
-- 10 Financial Exception categories with aging analysis across standard buckets (0–7d, 8–30d, 31–60d, 61–90d, 90+d).
-- A cryptographically consistent, append-only, immutable financial audit trail.
-- Granular Role-Based Access Control (RBAC) across 4 standard roles (Administrator, Accountant, Reviewer, Auditor).
-- Real-time executive dashboard calculating honest figures directly from database records.
+- **PostgreSQL Relational Schema:** A fully normalized, PostgreSQL database schema managed via Prisma migrations with multi-tenant organization isolation.
+- **Financial Precision:** Strict `Decimal` numeric representation across all balance, debit, credit, allocation, and tolerance fields, avoiding floating-point rounding errors.
+- **Server-Authoritative Authentication:** Cryptographically signed Bearer session tokens with server-verified user and organization contexts (no client-controlled identity headers).
+- **Institutional Banking Hierarchy:** Multi-entity hierarchy (`Organization`, `Bank`, `BankAccount`, `BankStatement`, `StatementPage`).
+- **Honest Statement Lifecycle:** Initial statement registration statuses (`PENDING`, `NOT_CHECKED`, `NOT_REQUIRED`) reflecting real intake state without fabricated extraction or OCR scores.
+- **Dual Transaction Ingestion:** Bank feed and GL transaction ingestion models preserving raw JSON payloads for non-repudiation and SHA-256 deduplication fingerprints.
+- **Topological Matching Model:** Multi-item matching data models supporting 1:1, 1:Many, Many:1, and Many:Many match structures with allocated amount tracking.
+- **9 Matching Criteria & Rules:** 4 Strong criteria (Amount, Reference#, Cheque#, Account#) and 5 Additional criteria (Date, Type, Currency, Narration, Counterparty).
+- **Configurable Controls & Tolerances:** Default minimum 3 criteria with 2 strong criteria, plus multi-level amount/date tolerance configurations.
+- **Formal Workflow State Machine:** Strict linear stage transitions (`PREPARED` → `REVIEWED` → `APPROVED` → `CLOSED`), disallowing skipping stages or arbitrary mutations.
+- **Locked Period Protection:** Closed and locked reconciliation periods prevent financial mutations, match additions, or unmatching.
+- **Append-Only Audit Logging:** Server-scoped audit records tracking actor identity from authenticated server context with no mutation or deletion endpoints.
+- **Granular RBAC:** 4 standard roles (Administrator, Accountant, Reviewer, Auditor) and 12 granular permissions.
 
 ---
 
 ## 2. Tech Stack
 
-- **Backend / Runtime:** Node.js, Express 4, TypeScript 5.8
-- **ORM & Data Layer:** Prisma 6.4.1 (with SQLite/PostgreSQL compatibility)
-- **Validation Engine:** Zod 4.5.4 (Strict server-side request parsing & input sanitation)
-- **Frontend / Client:** React 19, Vite 6, Tailwind CSS 4, Lucide Icons, Motion
-- **Testing Framework:** Vitest 4.1.11
+- **Backend / Runtime:** Node.js, Express, TypeScript
+- **ORM & Data Layer:** Prisma ORM with PostgreSQL schema and migrations
+- **Validation Engine:** Zod (Strict server-side request parsing & input sanitation)
+- **Frontend / Client:** React, Vite, Tailwind CSS, Lucide Icons, Motion
+- **Testing Framework:** Vitest
 
 ---
 
@@ -38,25 +40,27 @@ The codebase is organized into modular layers with clear boundaries:
 
 ```
 ├── prisma/
-│   └── schema.prisma           # Relational schema (16 models, constraints, indexes)
+│   ├── schema.prisma           # PostgreSQL relational schema (16 models, constraints, indexes)
+│   └── migrations/             # Standard PostgreSQL migration SQL scripts
 ├── server/
 │   ├── db.ts                   # Prisma client singleton & connection probe
 │   ├── seed.ts                 # Database seed script for standard roles, criteria & accounts
 │   ├── services/
+│   │   ├── authService.ts      # Server-side cryptographic session token management
 │   │   └── auditService.ts     # Immutable, append-only audit event service
 │   ├── middleware/
-│   │   ├── auth.ts             # Auth context & active role header extraction
+│   │   ├── auth.ts             # Server-authoritative Bearer token verification
 │   │   ├── rbac.ts             # Granular permission verification middleware
-│   │   └── organizationIsolation.ts # Strict multi-tenant isolation middleware
+│   │   └── organizationIsolation.ts # Multi-tenant isolation middleware
 │   ├── validators/
 │   │   └── schemas.ts          # Zod validation schemas for all financial payloads
 │   └── routes/
 │       ├── systemRoutes.ts     # Health checks, DB introspection & seed triggers
-│       ├── authRoutes.ts       # User context & role permissions endpoints
+│       ├── authRoutes.ts       # Login, session verification & demo accounts
 │       ├── bankRoutes.ts       # Bank and Bank Account management
-│       ├── statementRoutes.ts  # Statement registration and OCR page tracking
-│       ├── transactionRoutes.ts# Bank & GL transaction ingestion
-│       ├── reconciliationRoutes.ts # Reconciliation periods & matching junction
+│       ├── statementRoutes.ts  # Statement registration and honest status tracking
+│       ├── transactionRoutes.ts# Bank & GL transaction ingestion with Decimal precision
+│       ├── reconciliationRoutes.ts # Reconciliation periods, matching junction & workflow
 │       ├── matchingRoutes.ts   # Criteria directory, controls, rules & tolerances
 │       ├── exceptionRoutes.ts  # Exception logging & resolution
 │       ├── agingRoutes.ts      # Real outstanding aging calculation
@@ -64,22 +68,23 @@ The codebase is organized into modular layers with clear boundaries:
 │       └── dashboardRoutes.ts  # Real aggregate KPI metrics
 ├── src/
 │   ├── types.ts                # Shared TypeScript models and API contracts
-│   ├── services/api.ts         # Frontend API client
+│   ├── services/api.ts         # Frontend API client with Bearer session auth
 │   └── components/             # React views
-│       ├── Header.tsx          # Institutional header & RBAC switcher
+│       ├── Header.tsx          # Institutional header & server-authenticated user switcher
 │       ├── DashboardView.tsx   # Executive dashboard with honest metrics
 │       ├── BankStructureView.tsx # Banks & accounts register
-│       ├── StatementsView.tsx  # Statement register with OCR tracking
+│       ├── StatementsView.tsx  # Statement register with honest lifecycle tracking
 │       ├── TransactionsView.tsx # Bank vs GL tables with raw JSON inspector
 │       ├── ReconciliationsView.tsx # Reconciliation periods & match topology
 │       ├── MatchingControlsView.tsx # 9 Criteria, 3/2 controls, rules & tolerances
 │       ├── ExceptionsAgingView.tsx # Exception management & live aging buckets
-│       ├── AuditLogView.tsx    # Cryptographic audit log viewer
+│       ├── AuditLogView.tsx    # Audit log viewer
 │       └── SystemHealthModal.tsx # Schema introspection & health probe
 ├── tests/
-│   ├── database.test.ts        # Connectivity, models, and relationships
-│   ├── organization-isolation.test.ts # Tenant isolation enforcement
+│   ├── auth-isolation.test.ts  # Server session token signing & verification
+│   ├── workflow-matching.test.ts # State machine transitions, locked periods & Decimal precision
 │   ├── rbac-permissions.test.ts# 4 standard roles & 12 granular permissions
+│   ├── organization-isolation.test.ts # Tenant isolation enforcement
 │   └── matching-controls-tolerances.test.ts # Criteria, controls, rules & tolerances
 ├── server.ts                   # Express entry point with Vite middleware
 └── package.json
@@ -87,65 +92,18 @@ The codebase is organized into modular layers with clear boundaries:
 
 ---
 
-## 4. Database Structure & Relational Integrity
+## 4. Security & Hardening Controls
 
-### Entity Hierarchy:
-1. **Organization** (Multi-tenant partition key)
-2. **User & Roles & Permissions** (RBAC junction models: `UserRole`, `RolePermission`)
-3. **Bank & BankAccount** (Unique per org + bank + account number; tracks GL code and balances)
-4. **BankStatement & StatementPage** (Tracks file type, OCR extraction status, confidence, and page metadata)
-5. **BankTransaction & GlTransaction** (Preserves `originalImportedData` and `originalData` JSON, SHA-256 fingerprint)
-6. **ReconciliationPeriod** (Prepared by, Reviewed by, Approved by workflow with locking state)
-7. **ReconciliationMatch & Junctions** (`BankTransactionMatch`, `GlTransactionMatch` enabling 1:1, 1:Many, Many:1, Many:Many matches)
-8. **MatchingCriterion** (9 predefined criteria with `isStrong` classification)
-9. **MatchingControlConfig** (Min total criteria, min strong criteria thresholds)
-10. **MatchingRule & ToleranceConfig** (Rule priorities, fixed/percent amounts, date tolerance days)
-11. **ExceptionRecord** (10 standard categories, risk level, priority, resolution audit)
-12. **AgingBucketConfig** (Default buckets: 0–7d, 8–30d, 31–60d, 61–90d, 90+d)
-13. **AuditEvent** (Immutable timestamped ledger with actor, differential before/after JSON, and reason)
+### Authentication & Tenant Isolation
+- **Session Tokens:** Authentication uses HMAC SHA-256 signed session tokens issued via `POST /api/auth/login`.
+- **Identity Derivation:** Tenant organization and user role context are derived strictly on the server from the authenticated session and database records.
+- **Tenant Protection:** Inbound requests targeting resources or query parameters from other organizations are rejected with HTTP 403 Forbidden.
 
----
+### Financial Precision
+- All monetary balances, debit/credit values, allocated match amounts, and tolerances utilize `Decimal` (mapped to PostgreSQL `DECIMAL(18,4)` / `DECIMAL(18,2)`).
+- Floating-point calculations are eliminated in monetary routes and services.
 
-## 5. Security, RBAC & Multi-Tenant Isolation
-
-### 4 Standard Financial Roles:
-- **Administrator (`ADMIN`):** Full configuration, user management, and rule setup.
-- **Accountant (`ACCOUNTANT`):** Upload statements/GL, perform reconciliations, resolve exceptions.
-- **Reviewer (`REVIEWER`):** Review reconciliations, approve period closes, inspect exceptions.
-- **Auditor (`AUDITOR`):** Read-only compliance access to audit trails, transactions, and metrics.
-
-### 12 Granular Permissions:
-`view_dashboard`, `upload_statement`, `upload_gl`, `view_transactions`, `reconcile`, `manually_match`, `resolve_exception`, `approve_reconciliation`, `configure_rules`, `configure_tolerances`, `manage_users`, `view_audit_log`.
-
----
-
-## 6. How to Run & Test
-
-### Environment Variables
-Ensure `.env` contains:
-```env
-PORT=3000
-DATABASE_URL="file:./dev.db"
-NODE_ENV=development
-```
-
-### Running Tests
-Execute the Vitest suite covering database integrity, organization isolation, RBAC permissions, and matching controls:
-```bash
-npm test
-```
-
-### Running the Development Server
-```bash
-npm run dev
-```
-The server binds to `0.0.0.0:3000`.
-
----
-
-## 7. Major Design Decisions & Trade-Offs
-
-1. **Junction Table Matching Architecture:** Rather than linking a bank transaction directly to a single GL transaction via a foreign key, we implemented `ReconciliationMatch` with `BankTransactionMatch` and `GlTransactionMatch` junction tables. This allows native representation of split deposits (1:Many), consolidated fee settlements (Many:1), and complex multi-entry adjustments (Many:Many).
-2. **Preservation of Raw Financial Data:** All transactions retain raw JSON payloads (`originalImportedData` and `originalData`) alongside structured columns to guarantee non-repudiation and auditability during subsequent automated parsing phases.
-3. **Strict Server-Side Authorization:** RBAC is enforced strictly at the Express route middleware layer using `requirePermission`, preventing security reliance on client-side state.
-4. **Honest Database Metrics:** The dashboard executes live aggregation queries against the database and renders an empty state if no records exist, strictly avoiding fabricated demo figures.
+### Approval Workflow State Machine
+- Linear stage progression: `PREPARED` → `REVIEWED` → `APPROVED` → `CLOSED`.
+- Reopening closed or approved periods requires administrative privileges (`manage_users` permission).
+- Closed and locked periods strictly block new matches, unmatching, and financial edits.

@@ -1,10 +1,48 @@
 import { Router } from 'express';
 import { prisma } from '../db';
-import { requirePermission } from '../middleware/rbac';
-import { recordAuditEvent } from '../services/auditService';
+import { loginWithEmail, revokeSession, DEV_ACCOUNTS } from '../services/authService';
 
 export const authRouter = Router();
 
+// Public: Get demo accounts available for development testing
+authRouter.get('/demo-accounts', async (req, res) => {
+  res.json({
+    accounts: DEV_ACCOUNTS,
+    instructions: 'Use POST /api/auth/login with the email address to obtain a secure Bearer token.',
+  });
+});
+
+// Public: Login with email to obtain server-verified session token
+authRouter.post('/login', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email || typeof email !== 'string') {
+      return res.status(400).json({ error: 'Valid email is required for authentication' });
+    }
+
+    const authResult = await loginWithEmail(email);
+    if (!authResult) {
+      return res.status(401).json({ error: 'Invalid credentials or inactive user account' });
+    }
+
+    res.json(authResult);
+  } catch (error) {
+    console.error('Error during login:', error);
+    res.status(500).json({ error: 'Login failed due to internal error' });
+  }
+});
+
+// Protected: Revoke current session token
+authRouter.post('/logout', async (req, res) => {
+  const authHeader = req.headers['authorization'];
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.substring(7).trim();
+    revokeSession(token);
+  }
+  res.json({ message: 'Logged out successfully' });
+});
+
+// Protected: Get current authenticated user profile and organization
 authRouter.get('/me', async (req, res) => {
   if (!req.user || !req.organization) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -16,9 +54,18 @@ authRouter.get('/me', async (req, res) => {
   });
 });
 
+// Protected: Get organizations (scoped to active organizations list)
 authRouter.get('/organizations', async (req, res) => {
   try {
     const organizations = await prisma.organization.findMany({
+      where: { status: 'ACTIVE' },
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+        baseCurrency: true,
+        status: true,
+      },
       orderBy: { name: 'asc' },
     });
     res.json({ organizations });
@@ -28,11 +75,12 @@ authRouter.get('/organizations', async (req, res) => {
   }
 });
 
+// Protected: Get users list (scoped strictly to current tenant organization)
 authRouter.get('/users', async (req, res) => {
   try {
-    const orgId = req.organization?.id;
+    const orgId = req.organization!.id;
     const users = await prisma.user.findMany({
-      where: orgId ? { organizationId: orgId } : {},
+      where: { organizationId: orgId },
       include: {
         organization: { select: { id: true, name: true, slug: true } },
         userRoles: {
@@ -50,10 +98,6 @@ authRouter.get('/users', async (req, res) => {
         },
       },
       orderBy: { createdAt: 'asc' },
-    });
-
-    const allOrganizations = await prisma.organization.findMany({
-      orderBy: { name: 'asc' },
     });
 
     const formattedUsers = users.map((u) => {
@@ -82,7 +126,6 @@ authRouter.get('/users', async (req, res) => {
 
     res.json({
       users: formattedUsers,
-      organizations: allOrganizations,
     });
   } catch (error) {
     console.error('Error fetching users:', error);

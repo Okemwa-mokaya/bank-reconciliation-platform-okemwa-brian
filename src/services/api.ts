@@ -14,34 +14,68 @@ import {
   AgingBucketAnalysis,
   AuditEvent,
   DashboardSummaryResponse,
-  UserContext,
 } from '../types';
 
-let currentRole = 'ADMIN';
-let currentOrgSlug = 'acme-treasury';
-
-export function setCurrentRole(role: string) {
-  currentRole = role;
+export interface AuthSession {
+  token: string;
+  user: {
+    id: string;
+    email: string;
+    fullName: string;
+    organizationId: string;
+    roles: string[];
+    permissions: string[];
+  };
+  organization: {
+    id: string;
+    name: string;
+    slug: string;
+    baseCurrency: string;
+  };
 }
 
-export function getCurrentRole(): string {
-  return currentRole;
+export interface DemoAccount {
+  email: string;
+  fullName: string;
+  role: string;
+  orgName: string;
+  orgSlug: string;
+  description: string;
 }
 
-export function setCurrentOrgSlug(slug: string) {
-  currentOrgSlug = slug;
+const STORAGE_TOKEN_KEY = 'verifin_auth_token';
+const STORAGE_EMAIL_KEY = 'verifin_auth_email';
+
+let currentSession: AuthSession | null = null;
+let sessionListeners: Array<(session: AuthSession | null) => void> = [];
+
+export function getAuthToken(): string | null {
+  return currentSession?.token || localStorage.getItem(STORAGE_TOKEN_KEY);
 }
 
-export function getCurrentOrgSlug(): string {
-  return currentOrgSlug;
+export function getCurrentSession(): AuthSession | null {
+  return currentSession;
+}
+
+export function subscribeToSession(callback: (session: AuthSession | null) => void) {
+  sessionListeners.push(callback);
+  return () => {
+    sessionListeners = sessionListeners.filter((l) => l !== callback);
+  };
+}
+
+function notifySessionListeners() {
+  for (const listener of sessionListeners) {
+    listener(currentSession);
+  }
 }
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
-  const headers = {
+  const token = getAuthToken();
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'x-organization-slug': currentOrgSlug,
-    'x-user-role': currentRole,
-    ...options.headers,
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(options.headers as Record<string, string> || {}),
   };
 
   const response = await fetch(endpoint, {
@@ -58,8 +92,55 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 }
 
 export const api = {
-  // Auth & Context
-  getCurrentUser: () => request<UserContext>('/api/auth/me'),
+  // Authentication & Session
+  async getDemoAccounts(): Promise<{ accounts: DemoAccount[] }> {
+    return request<{ accounts: DemoAccount[] }>('/api/auth/demo-accounts');
+  },
+
+  async login(email: string): Promise<AuthSession> {
+    const session = await request<AuthSession>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    });
+
+    currentSession = session;
+    localStorage.setItem(STORAGE_TOKEN_KEY, session.token);
+    localStorage.setItem(STORAGE_EMAIL_KEY, email);
+    notifySessionListeners();
+    return session;
+  },
+
+  async logout(): Promise<void> {
+    try {
+      await request('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // Ignore network failures during logout
+    }
+    currentSession = null;
+    localStorage.removeItem(STORAGE_TOKEN_KEY);
+    localStorage.removeItem(STORAGE_EMAIL_KEY);
+    notifySessionListeners();
+  },
+
+  async restoreSession(): Promise<AuthSession | null> {
+    const storedEmail = localStorage.getItem(STORAGE_EMAIL_KEY) || 'admin@acmetreasury.com';
+    try {
+      return await api.login(storedEmail);
+    } catch (err) {
+      console.warn('Could not restore previous session, falling back to default admin', err);
+      try {
+        return await api.login('admin@acmetreasury.com');
+      } catch (adminErr) {
+        console.error('Failed to log in with default account', adminErr);
+        return null;
+      }
+    }
+  },
+
+  async getCurrentUser() {
+    return request<{ user: AuthSession['user']; organization: AuthSession['organization'] }>('/api/auth/me');
+  },
+
   getOrganizations: () => request<{ organizations: any[] }>('/api/auth/organizations'),
 
   // Dashboard
