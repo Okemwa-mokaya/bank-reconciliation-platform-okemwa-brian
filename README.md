@@ -9,6 +9,7 @@ The **Bank Reconciliation & Financial Verification Platform** is an enterprise-g
 
 This implementation delivers the complete **Phase 1: Foundation & Architecture**, establishing:
 - **PostgreSQL Relational Schema:** A fully normalized, PostgreSQL database schema managed via Prisma migrations with multi-tenant organization isolation.
+- **Strict Database Connection Safety:** Requires explicit `DATABASE_URL` PostgreSQL configuration from the environment with clear diagnostic error handling and credential sanitization (no SQLite or in-memory fallback).
 - **Financial Precision:** Strict `Decimal` numeric representation across all balance, debit, credit, allocation, and tolerance fields, avoiding floating-point rounding errors.
 - **Server-Authoritative Authentication:** Cryptographically signed Bearer session tokens with server-verified user and organization contexts (no client-controlled identity headers).
 - **Institutional Banking Hierarchy:** Multi-entity hierarchy (`Organization`, `Bank`, `BankAccount`, `BankStatement`, `StatementPage`).
@@ -27,7 +28,7 @@ This implementation delivers the complete **Phase 1: Foundation & Architecture**
 ## 2. Tech Stack
 
 - **Backend / Runtime:** Node.js, Express, TypeScript
-- **ORM & Data Layer:** Prisma ORM with PostgreSQL schema and migrations
+- **ORM & Data Layer:** Prisma ORM with PostgreSQL schema (`provider = "postgresql"`)
 - **Validation Engine:** Zod (Strict server-side request parsing & input sanitation)
 - **Frontend / Client:** React, Vite, Tailwind CSS, Lucide Icons, Motion
 - **Testing Framework:** Vitest
@@ -41,9 +42,10 @@ The codebase is organized into modular layers with clear boundaries:
 ```
 ├── prisma/
 │   ├── schema.prisma           # PostgreSQL relational schema (16 models, constraints, indexes)
-│   └── migrations/             # Standard PostgreSQL migration SQL scripts
+│   ├── migrations/             # Standard PostgreSQL migration SQL scripts
+│   └── migrations/migration_lock.toml # Declares PostgreSQL provider
 ├── server/
-│   ├── db.ts                   # Prisma client singleton & connection probe
+│   ├── db.ts                   # Prisma client singleton & connection safety probe
 │   ├── seed.ts                 # Database seed script for standard roles, criteria & accounts
 │   ├── services/
 │   │   ├── authService.ts      # Server-side cryptographic session token management
@@ -85,7 +87,8 @@ The codebase is organized into modular layers with clear boundaries:
 │   ├── workflow-matching.test.ts # State machine transitions, locked periods & Decimal precision
 │   ├── rbac-permissions.test.ts# 4 standard roles & 12 granular permissions
 │   ├── organization-isolation.test.ts # Tenant isolation enforcement
-│   └── matching-controls-tolerances.test.ts # Criteria, controls, rules & tolerances
+│   ├── matching-controls-tolerances.test.ts # Criteria, controls, rules & tolerances
+│   └── database.test.ts        # Database connection safety, configuration & entity structure
 ├── server.ts                   # Express entry point with Vite middleware
 └── package.json
 ```
@@ -110,7 +113,35 @@ The codebase is organized into modular layers with clear boundaries:
 
 ---
 
-## 5. Phase 1 Capabilities & Boundaries
+## 5. Database Configuration & Setup
+
+### Environment Variable Requirement
+The application requires `DATABASE_URL` to be explicitly defined in the environment.
+- **Required Protocol:** `postgresql://` or `postgres://`
+- **Format:** `postgresql://<user>:<password>@<host>:<port>/<database>?schema=public`
+
+If `DATABASE_URL` is omitted, the application and connection health probe report an explicit configuration error:
+`DATABASE_URL environment variable is missing or empty. Please configure a valid PostgreSQL connection string in your environment.`
+
+No fallback SQLite database or in-memory mock is used.
+
+### Schema Migration & Deployment
+```bash
+# Validate Prisma schema
+DATABASE_URL="postgresql://user:pass@localhost:5432/bank_reconciliation" npx prisma validate
+
+# Push schema changes to PostgreSQL
+DATABASE_URL="postgresql://user:pass@localhost:5432/bank_reconciliation" npx prisma db push
+```
+
+### Running Tests
+```bash
+npm test -- --run
+```
+
+---
+
+## 6. Phase 1 Capabilities & Boundaries
 
 ### Phase 1 Implemented Capabilities
 - **Relational Data Foundation:** PostgreSQL database schema with complete multi-tenant relational modeling.
@@ -125,4 +156,3 @@ The codebase is organized into modular layers with clear boundaries:
 - **Honest Statement Intake:** Statement uploads initialize in `PENDING` status.
 - **No Phase 2 Parsing Engines:** CSV/XLSX/PDF file parsing, OCR engines, and automated extraction pipelines belong to Phase 2 and are intentionally omitted in Phase 1.
 - **No Mock Machine Learning:** No fabricated OCR confidence scores or synthetic extraction metrics are generated.
-
