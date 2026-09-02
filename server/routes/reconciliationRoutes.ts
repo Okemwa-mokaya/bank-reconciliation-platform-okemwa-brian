@@ -460,12 +460,11 @@ reconciliationRouter.post('/:id/unmatch', requirePermission('manually_match'), u
 reconciliationRouter.post('/periods/:id/unmatch', requirePermission('manually_match'), unmatchHandler);
 
 // Phase 1 Scope: Automatic matching engine execution is deferred to Phase 3 (Reconciliation Engine)
-export const proposeAutoMatchesHandler = async (req: Request, res: Response) => {
+export const proposeAutoMatchesHandler = async (req: any, res: any) => {
   return res.status(501).json({
     status: 'DEFERRED',
     error: 'Not Implemented',
     phase: 'PHASE_3_DEFERRED',
-    code: 'PHASE_3_DEFERRED',
     message: 'Automatic reconciliation engine execution is deferred to Phase 3.',
   });
 };
