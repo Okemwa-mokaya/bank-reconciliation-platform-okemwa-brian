@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, Request, Response } from 'express';
 import { prisma } from '../db';
 import { requirePermission } from '../middleware/rbac';
 import { CreateReconciliationPeriodSchema, SubmitApprovalSchema } from '../validators/schemas';
@@ -460,13 +460,12 @@ reconciliationRouter.post('/:id/unmatch', requirePermission('manually_match'), u
 reconciliationRouter.post('/periods/:id/unmatch', requirePermission('manually_match'), unmatchHandler);
 
 // Phase 1 Scope: Automatic matching engine execution is deferred to Phase 3 (Reconciliation Engine)
-export const proposeAutoMatchesHandler = async (req: any, res: any) => {
+export const proposeAutoMatchesHandler = async (req: Request, res: Response) => {
   return res.status(501).json({
     status: 'DEFERRED',
     code: 'PHASE_3_DEFERRED',
     error: 'Not Implemented',
-    message:
-      'Automatic reconciliation execution is NOT implemented in Phase 1 and is deferred to Phase 3 (Reconciliation Engine). Phase 1 provides the complete reconciliation foundation, 9 matching criteria, organization control thresholds (min 3 total, min 2 strong), configurable rules and multi-tier tolerances, and manual matching workflows.',
+    message: 'Automatic reconciliation engine execution is deferred to Phase 3.',
   });
 };
 

@@ -141,7 +141,7 @@ describe('Workflow State Machine & Reconciliation Matching Guard Logic', () => {
     };
 
     // Invoke the actual production handler directly from server/routes/reconciliationRoutes.ts
-    await proposeAutoMatchesHandler(mockReq, mockRes);
+    await proposeAutoMatchesHandler(mockReq as any, mockRes as any);
 
     // 1. Assert HTTP status 501 Not Implemented
     expect(mockRes.statusCode).toBe(501);
@@ -150,8 +150,7 @@ describe('Workflow State Machine & Reconciliation Matching Guard Logic', () => {
     expect(mockRes.jsonData.status).toBe('DEFERRED');
     expect(mockRes.jsonData.code).toBe('PHASE_3_DEFERRED');
     expect(mockRes.jsonData.error).toBe('Not Implemented');
-    expect(mockRes.jsonData.message).toContain('Automatic reconciliation execution is NOT implemented in Phase 1');
-    expect(mockRes.jsonData.message).toContain('deferred to Phase 3');
+    expect(mockRes.jsonData.message).toBe('Automatic reconciliation engine execution is deferred to Phase 3.');
 
     // 3. Assert zero database side effects: match count unchanged, zero junction records, transaction statuses unmodified
     expect(existingMatches.length).toBe(initialMatchCount);
