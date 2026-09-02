@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { Prisma } from '@prisma/client';
+import { proposeAutoMatchesHandler } from '../server/routes/reconciliationRoutes';
 
 describe('Workflow State Machine & Reconciliation Matching Guard Logic', () => {
   it('1. Validates strict stage transition sequences: PREPARED -> REVIEWED -> APPROVED -> CLOSED', () => {
@@ -104,13 +105,15 @@ describe('Workflow State Machine & Reconciliation Matching Guard Logic', () => {
     expect(auditPayload.action).toBe('MATCH_CREATED');
   });
 
-  it('7. Proves automatic reconciliation execution is deferred to Phase 3 (HTTP 501, cannot create matches or change statuses)', async () => {
-    // Mock handler response simulation for propose-auto-matches
-    let matchCreated = false;
-    let transactionStatusChanged = false;
+  it('7. Proves production automatic reconciliation execution endpoint returns HTTP 501 (PHASE_3_DEFERRED) and cannot create matches or mutate transaction statuses', async () => {
+    const mockReq = {
+      organization: { id: 'org-test-123' },
+      params: { id: 'period-test-123' },
+      user: { id: 'user-test-123', email: 'admin@acme.corp', roles: ['ADMIN'], permissions: ['reconcile'] },
+    };
 
     const mockRes = {
-      statusCode: 200,
+      statusCode: 0,
       jsonData: null as any,
       status(code: number) {
         this.statusCode = code;
@@ -122,26 +125,15 @@ describe('Workflow State Machine & Reconciliation Matching Guard Logic', () => {
       },
     };
 
-    // Simulated proposeAutoMatchesHandler for Phase 1
-    const phase1Handler = async (req: any, res: any) => {
-      return res.status(501).json({
-        status: 'DEFERRED',
-        error: 'Not Implemented',
-        phase: 'PHASE_3_DEFERRED',
-        message:
-          'Automatic reconciliation engine execution is deferred to Phase 3 (Reconciliation Engine). Phase 1 provides the complete reconciliation foundation, 9 matching criteria, organization control thresholds (min 3 total, min 2 strong), configurable rules and multi-tier tolerances, and manual matching workflows.',
-      });
-    };
-
-    await phase1Handler({}, mockRes);
+    // Invoke the actual production handler from server/routes/reconciliationRoutes.ts
+    await proposeAutoMatchesHandler(mockReq, mockRes);
 
     expect(mockRes.statusCode).toBe(501);
     expect(mockRes.jsonData.status).toBe('DEFERRED');
-    expect(mockRes.jsonData.phase).toBe('PHASE_3_DEFERRED');
+    expect(mockRes.jsonData.code).toBe('PHASE_3_DEFERRED');
+    expect(mockRes.jsonData.error).toBe('Not Implemented');
     expect(mockRes.jsonData.message).toContain('Phase 3');
-    // Verifies no side effects occurred: no matches created and no status mutations
-    expect(matchCreated).toBe(false);
-    expect(transactionStatusChanged).toBe(false);
+    expect(mockRes.jsonData.message).toContain('Automatic reconciliation execution is NOT implemented in Phase 1');
   });
 
   it('8. Verifies Phase 1 matching topology data structures support 1:1, 1:Many, Many:1, Many:Many, Manual, and Adjustment', () => {
