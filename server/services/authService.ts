@@ -16,47 +16,57 @@ const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 // Default development accounts credentials map
 export const DEV_ACCOUNTS = [
   {
-    email: 'admin@acme.corp',
+    email: 'sarah.admin@acmetreasury.com',
     role: 'ADMIN',
+    orgName: 'Acme Global Treasury Corp',
     orgSlug: 'acme-treasury',
-    name: 'Sarah Chen (Administrator)',
+    fullName: 'Sarah Jenkins',
+    description: 'Full administrative access to financial configuration, users, rules, and audit logs',
   },
   {
-    email: 'accountant@acme.corp',
+    email: 'michael.accountant@acmetreasury.com',
     role: 'ACCOUNTANT',
+    orgName: 'Acme Global Treasury Corp',
     orgSlug: 'acme-treasury',
-    name: 'Marcus Vance (Senior Treasury Accountant)',
+    fullName: 'Michael Chen',
+    description: 'Operations specialist: imports statements, performs matches, and resolves exceptions',
   },
   {
-    email: 'reviewer@acme.corp',
+    email: 'elena.reviewer@acmetreasury.com',
     role: 'REVIEWER',
+    orgName: 'Acme Global Treasury Corp',
     orgSlug: 'acme-treasury',
-    name: 'Elena Rostova (Reconciliation Reviewer)',
+    fullName: 'Elena Rostova',
+    description: 'Independent verification: reviews reconciliations, exceptions and submits stage approvals',
   },
   {
-    email: 'auditor@acme.corp',
+    email: 'marcus.auditor@acmetreasury.com',
     role: 'AUDITOR',
+    orgName: 'Acme Global Treasury Corp',
     orgSlug: 'acme-treasury',
-    name: 'David Kalu (Internal Financial Auditor)',
+    fullName: 'Marcus Vance',
+    description: 'Read-only compliance officer with immutable audit trail inspection rights',
   },
   {
-    email: 'admin@globalapex.com',
+    email: 'elena.admin@apexholdings.eu',
     role: 'ADMIN',
-    orgSlug: 'global-apex',
-    name: 'Tenant B Admin (Global Apex)',
+    orgName: 'Apex Financial Holdings LLC',
+    orgSlug: 'apex-holdings',
+    fullName: 'Elena Rostova (Apex Admin)',
+    description: 'Tenant B Administrator for multi-tenant isolation testing',
   },
 ];
 
 export async function createSession(userId: string): Promise<string> {
   const token = crypto.randomBytes(32).toString('hex');
   const now = new Date();
-  const expiresAt進 = new Date(now.getTime() + SESSION_TTL_MS);
+  const expiresAt = new Date(now.getTime() + SESSION_TTL_MS);
 
   const session: UserSession = {
     token,
     userId,
     createdAt: now,
-    expiresAt: expiresAt進,
+    expiresAt,
   };
 
   sessionStore.set(token, session);
@@ -124,11 +134,11 @@ export async function loginWithEmail(email: string): Promise<{
   const token = await createSession(user.id);
 
   const roles: string[] = user.userRoles.map((ur) => ur.role.code);
-  const permissionsSet四周 = new Set<string>();
+  const permissionsSet = new Set<string>();
 
   for (const ur of user.userRoles) {
     for (const rp of ur.role.permissions) {
-      permissionsSet四周.add(rp.permission.code);
+      permissionsSet.add(rp.permission.code);
     }
   }
 
@@ -140,7 +150,7 @@ export async function loginWithEmail(email: string): Promise<{
       fullName: user.fullName,
       organizationId: user.organizationId,
       roles,
-      permissions: Array.from(permissionsSet四周),
+      permissions: Array.from(permissionsSet),
     },
     organization: {
       id: user.organization.id,

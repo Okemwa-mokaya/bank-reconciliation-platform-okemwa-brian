@@ -6,6 +6,36 @@ export const authRouter = Router();
 
 // Public: Get demo accounts available for development testing
 authRouter.get('/demo-accounts', async (req, res) => {
+  try {
+    const users = await prisma.user.findMany({
+      where: { status: 'ACTIVE' },
+      include: {
+        organization: true,
+        userRoles: {
+          include: { role: true },
+        },
+      },
+      orderBy: { email: 'asc' },
+    });
+
+    if (users.length > 0) {
+      const accounts = users.map((u) => ({
+        email: u.email,
+        fullName: u.fullName,
+        role: u.userRoles[0]?.role?.code || 'ADMIN',
+        orgName: u.organization.name,
+        orgSlug: u.organization.slug,
+        description: u.userRoles[0]?.role?.description || '',
+      }));
+      return res.json({
+        accounts,
+        instructions: 'Use POST /api/auth/login with the email address to obtain a secure Bearer token.',
+      });
+    }
+  } catch (err) {
+    // If DB is offline or table is being initialized, return DEV_ACCOUNTS
+  }
+
   res.json({
     accounts: DEV_ACCOUNTS,
     instructions: 'Use POST /api/auth/login with the email address to obtain a secure Bearer token.',

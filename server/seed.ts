@@ -242,7 +242,7 @@ export async function seedDatabase() {
   });
 
   // Seed Multi-tenant Test Org 2 for verification of organization isolation
-  await prisma.organization.upsert({
+  const org2 = await prisma.organization.upsert({
     where: { slug: 'apex-holdings' },
     update: {
       name: 'Apex Financial Holdings LLC',
@@ -258,6 +258,34 @@ export async function seedDatabase() {
       status: 'ACTIVE',
     },
   });
+
+  // Seed Admin user for Org2
+  const org2Admin = await prisma.user.upsert({
+    where: { email: 'elena.admin@apexholdings.eu' },
+    update: { fullName: 'Elena Rostova (Apex Admin)', organizationId: org2.id },
+    create: {
+      email: 'elena.admin@apexholdings.eu',
+      fullName: 'Elena Rostova (Apex Admin)',
+      organizationId: org2.id,
+      status: 'ACTIVE',
+    },
+  });
+
+  if (roles['ADMIN']) {
+    await prisma.userRole.upsert({
+      where: {
+        userId_roleId: {
+          userId: org2Admin.id,
+          roleId: roles['ADMIN'],
+        },
+      },
+      update: {},
+      create: {
+        userId: org2Admin.id,
+        roleId: roles['ADMIN'],
+      },
+    });
+  }
 
   // 6. Organization Matching Control (Minimum 3 total criteria, Minimum 2 strong criteria)
   await prisma.matchingControlConfig.upsert({

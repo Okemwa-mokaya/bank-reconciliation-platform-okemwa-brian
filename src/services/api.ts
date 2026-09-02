@@ -123,17 +123,51 @@ export const api = {
   },
 
   async restoreSession(): Promise<AuthSession | null> {
-    const storedEmail = localStorage.getItem(STORAGE_EMAIL_KEY) || 'admin@acmetreasury.com';
-    try {
-      return await api.login(storedEmail);
-    } catch (err) {
-      console.warn('Could not restore previous session, falling back to default admin', err);
+    const storedEmail = localStorage.getItem(STORAGE_EMAIL_KEY);
+    const storedToken = localStorage.getItem(STORAGE_TOKEN_KEY);
+
+    // 1. If stored token exists, attempt to validate with /api/auth/me
+    if (storedToken) {
       try {
-        return await api.login('admin@acmetreasury.com');
-      } catch (adminErr) {
-        console.error('Failed to log in with default account', adminErr);
-        return null;
+        const meRes = await request<{ user: AuthSession['user']; organization: AuthSession['organization'] }>('/api/auth/me');
+        currentSession = {
+          token: storedToken,
+          user: meRes.user,
+          organization: meRes.organization,
+        };
+        notifySessionListeners();
+        return currentSession;
+      } catch {
+        // Token invalid or expired, continue to login fallback
+        localStorage.removeItem(STORAGE_TOKEN_KEY);
       }
+    }
+
+    // 2. Try logging in with the remembered user email
+    if (storedEmail) {
+      try {
+        return await api.login(storedEmail);
+      } catch (err) {
+        console.warn(`Could not restore session for ${storedEmail}:`, err);
+      }
+    }
+
+    // 3. Obtain active server demo accounts and authenticate as primary administrator
+    try {
+      const demoRes = await api.getDemoAccounts();
+      if (demoRes.accounts && demoRes.accounts.length > 0) {
+        return await api.login(demoRes.accounts[0].email);
+      }
+    } catch (demoErr) {
+      console.warn('Could not fetch demo accounts for initial login:', demoErr);
+    }
+
+    // 4. Default administrator fallback
+    try {
+      return await api.login('sarah.admin@acmetreasury.com');
+    } catch (adminErr) {
+      console.error('Failed to log in with default account:', adminErr);
+      return null;
     }
   },
 

@@ -64,10 +64,10 @@ export const Header: React.FC<HeaderProps> = ({
     }
   };
 
-  const currentEmail = session?.user?.email || 'admin@acmetreasury.com';
-  const currentOrgName = session?.organization?.name || 'Acme Global Treasury Corp';
+  const currentEmail = session?.user?.email || (demoAccounts[0]?.email ?? 'sarah.admin@acmetreasury.com');
+  const currentOrgName = session?.organization?.name || (demoAccounts[0]?.orgName ?? 'Acme Global Treasury Corp');
   const currentOrgCurrency = session?.organization?.baseCurrency || 'USD';
-  const currentRole = session?.user?.roles?.[0] || 'ADMIN';
+  const currentRole = session?.user?.roles?.[0] || (demoAccounts[0]?.role ?? 'ADMIN');
 
   return (
     <header className="border-b border-stone-200 bg-white sticky top-0 z-30 shadow-xs">
@@ -117,16 +117,16 @@ export const Header: React.FC<HeaderProps> = ({
                 {demoAccounts.length > 0 ? (
                   demoAccounts.map((acc) => (
                     <option key={acc.email} value={acc.email}>
-                      {acc.fullName} ({acc.role} - {acc.orgName})
+                      {acc.fullName} ({acc.role} - {acc.orgName || acc.orgSlug})
                     </option>
                   ))
                 ) : (
                   <>
-                    <option value="admin@acmetreasury.com">Arthur Vance (ADMIN - Acme)</option>
-                    <option value="accountant@acmetreasury.com">Beatrice Lin (ACCOUNTANT - Acme)</option>
-                    <option value="reviewer@acmetreasury.com">Charles Montgomery (REVIEWER - Acme)</option>
-                    <option value="auditor@acmetreasury.com">Diana Prince (AUDITOR - Acme)</option>
-                    <option value="apex.admin@apexholdings.eu">Elena Rostova (ADMIN - Apex EUR)</option>
+                    <option value="sarah.admin@acmetreasury.com">Sarah Jenkins (ADMIN - Acme Global Treasury Corp)</option>
+                    <option value="michael.accountant@acmetreasury.com">Michael Chen (ACCOUNTANT - Acme Global Treasury Corp)</option>
+                    <option value="elena.reviewer@acmetreasury.com">Elena Rostova (REVIEWER - Acme Global Treasury Corp)</option>
+                    <option value="marcus.auditor@acmetreasury.com">Marcus Vance (AUDITOR - Acme Global Treasury Corp)</option>
+                    <option value="elena.admin@apexholdings.eu">Elena Rostova (ADMIN - Apex Financial Holdings LLC)</option>
                   </>
                 )}
               </select>
