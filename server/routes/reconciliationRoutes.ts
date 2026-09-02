@@ -463,8 +463,9 @@ reconciliationRouter.post('/periods/:id/unmatch', requirePermission('manually_ma
 export const proposeAutoMatchesHandler = async (req: Request, res: Response) => {
   return res.status(501).json({
     status: 'DEFERRED',
-    code: 'PHASE_3_DEFERRED',
     error: 'Not Implemented',
+    phase: 'PHASE_3_DEFERRED',
+    code: 'PHASE_3_DEFERRED',
     message: 'Automatic reconciliation engine execution is deferred to Phase 3.',
   });
 };

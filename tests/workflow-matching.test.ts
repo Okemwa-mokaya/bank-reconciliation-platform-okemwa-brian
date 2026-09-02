@@ -148,6 +148,7 @@ describe('Workflow State Machine & Reconciliation Matching Guard Logic', () => {
 
     // 2. Assert Phase 3 Deferred machine-readable response payload
     expect(mockRes.jsonData.status).toBe('DEFERRED');
+    expect(mockRes.jsonData.phase).toBe('PHASE_3_DEFERRED');
     expect(mockRes.jsonData.code).toBe('PHASE_3_DEFERRED');
     expect(mockRes.jsonData.error).toBe('Not Implemented');
     expect(mockRes.jsonData.message).toBe('Automatic reconciliation engine execution is deferred to Phase 3.');
