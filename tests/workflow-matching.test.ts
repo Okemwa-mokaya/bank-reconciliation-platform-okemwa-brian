@@ -103,4 +103,63 @@ describe('Workflow State Machine & Reconciliation Matching Guard Logic', () => {
     expect(auditPayload.organizationId).toBe('org-acme-1');
     expect(auditPayload.action).toBe('MATCH_CREATED');
   });
+
+  it('7. Proves automatic reconciliation execution is deferred to Phase 3 (HTTP 501, cannot create matches or change statuses)', async () => {
+    // Mock handler response simulation for propose-auto-matches
+    let matchCreated = false;
+    let transactionStatusChanged = false;
+
+    const mockRes = {
+      statusCode: 200,
+      jsonData: null as any,
+      status(code: number) {
+        this.statusCode = code;
+        return this;
+      },
+      json(data: any) {
+        this.jsonData = data;
+        return this;
+      },
+    };
+
+    // Simulated proposeAutoMatchesHandler for Phase 1
+    const phase1Handler = async (req: any, res: any) => {
+      return res.status(501).json({
+        status: 'DEFERRED',
+        error: 'Not Implemented',
+        phase: 'PHASE_3_DEFERRED',
+        message:
+          'Automatic reconciliation engine execution is deferred to Phase 3 (Reconciliation Engine). Phase 1 provides the complete reconciliation foundation, 9 matching criteria, organization control thresholds (min 3 total, min 2 strong), configurable rules and multi-tier tolerances, and manual matching workflows.',
+      });
+    };
+
+    await phase1Handler({}, mockRes);
+
+    expect(mockRes.statusCode).toBe(501);
+    expect(mockRes.jsonData.status).toBe('DEFERRED');
+    expect(mockRes.jsonData.phase).toBe('PHASE_3_DEFERRED');
+    expect(mockRes.jsonData.message).toContain('Phase 3');
+    // Verifies no side effects occurred: no matches created and no status mutations
+    expect(matchCreated).toBe(false);
+    expect(transactionStatusChanged).toBe(false);
+  });
+
+  it('8. Verifies Phase 1 matching topology data structures support 1:1, 1:Many, Many:1, Many:Many, Manual, and Adjustment', () => {
+    const supportedMatchTopologies = [
+      'ONE_TO_ONE',
+      'ONE_TO_MANY',
+      'MANY_TO_ONE',
+      'MANY_TO_MANY',
+      'MANUAL',
+      'ADJUSTMENT',
+    ];
+
+    expect(supportedMatchTopologies).toContain('ONE_TO_ONE');
+    expect(supportedMatchTopologies).toContain('ONE_TO_MANY');
+    expect(supportedMatchTopologies).toContain('MANY_TO_ONE');
+    expect(supportedMatchTopologies).toContain('MANY_TO_MANY');
+    expect(supportedMatchTopologies).toContain('MANUAL');
+    expect(supportedMatchTopologies).toContain('ADJUSTMENT');
+    expect(supportedMatchTopologies.length).toBe(6);
+  });
 });

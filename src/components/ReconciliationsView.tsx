@@ -51,10 +51,17 @@ export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ period
     <div className="space-y-6">
       {/* Header */}
       <div>
-        <h2 className="text-lg font-bold text-stone-900">Reconciliation Periods & Multi-Item Matches</h2>
-        <p className="text-xs text-stone-500">
-          Reconciliation lifecycle tracking, approval hierarchy, and topological match relationships (1:1, 1:Many, Many:Many)
-        </p>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-lg font-bold text-stone-900">Reconciliation Periods & Multi-Item Matches</h2>
+            <p className="text-xs text-stone-500">
+              Reconciliation lifecycle tracking, approval hierarchy, and topological match relationships (1:1, 1:Many, Many:Many)
+            </p>
+          </div>
+          <span className="inline-flex items-center px-2.5 py-1 rounded-md text-[11px] font-semibold bg-stone-100 text-stone-800 border border-stone-300">
+            Phase 1 Foundation: Topological Data Models & Manual Matching Active • Auto-Engine Deferred to Phase 3
+          </span>
+        </div>
       </div>
 
       {/* Periods Table */}

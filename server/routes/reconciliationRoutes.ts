@@ -459,114 +459,15 @@ const unmatchHandler = async (req: any, res: any) => {
 reconciliationRouter.post('/:id/unmatch', requirePermission('manually_match'), unmatchHandler);
 reconciliationRouter.post('/periods/:id/unmatch', requirePermission('manually_match'), unmatchHandler);
 
-// Propose automatic matches based on strict specification criteria (min 3 criteria, min 2 strong)
+// Phase 1 Scope: Automatic matching engine execution is deferred to Phase 3 (Reconciliation Engine)
 const proposeAutoMatchesHandler = async (req: any, res: any) => {
-  try {
-    const orgId = req.organization!.id;
-    const { id: periodId } = req.params;
-
-    const period = await prisma.reconciliationPeriod.findFirst({
-      where: { id: periodId, organizationId: orgId },
-    });
-
-    if (!period) {
-      return res.status(404).json({ error: 'Reconciliation period not found' });
-    }
-
-    if (period.isLocked || period.status === 'CLOSED') {
-      return res.status(403).json({ error: 'Cannot run matching on a locked or closed reconciliation period' });
-    }
-
-    // Get unmatched Bank and GL transactions
-    const [bankTxs, glTxs] = await Promise.all([
-      prisma.bankTransaction.findMany({
-        where: { organizationId: orgId, bankAccountId: period.bankAccountId, status: 'UNMATCHED' },
-      }),
-      prisma.glTransaction.findMany({
-        where: {
-          organizationId: orgId,
-          status: 'UNMATCHED',
-          OR: [{ bankAccountId: period.bankAccountId }, { bankAccountId: null }],
-        },
-      }),
-    ]);
-
-    const createdMatches: any[] = [];
-
-    // Evaluate exact 1:1 matches (Amount + Reference/Cheque + Date proximity)
-    for (const bTx of bankTxs) {
-      if (bTx.status === 'MATCHED') continue;
-
-      const bAmount = bTx.signedAmount.isNegative() ? bTx.signedAmount.negated() : bTx.signedAmount;
-
-      for (const gTx of glTxs) {
-        if (gTx.status === 'MATCHED') continue;
-
-        const gAmount = gTx.amount.isNegative() ? gTx.amount.negated() : gTx.amount;
-
-        // Check Strong Criterion 1: Amount exact match
-        const amountMatch = bAmount.equals(gAmount);
-        // Check Strong Criterion 2: Reference or Cheque number match
-        const refMatch =
-          Boolean(bTx.referenceNumber && gTx.referenceNumber && bTx.referenceNumber === gTx.referenceNumber) ||
-          Boolean(bTx.chequeNumber && gTx.chequeNumber && bTx.chequeNumber === gTx.chequeNumber);
-        // Check Additional Criterion 3: Date within 3 days
-        const daysDiff = Math.abs(
-          (new Date(bTx.transactionDate).getTime() - new Date(gTx.transactionDate).getTime()) / (1000 * 3600 * 24)
-        );
-        const dateMatch = daysDiff <= 3;
-
-        // Satisfies minimum 3 criteria including 2 strong
-        if (amountMatch && refMatch && dateMatch) {
-          const matchedCriteria = ['AMOUNT'];
-          if (bTx.referenceNumber && bTx.referenceNumber === gTx.referenceNumber) matchedCriteria.push('REFERENCE_NUMBER');
-          if (bTx.chequeNumber && bTx.chequeNumber === gTx.chequeNumber) matchedCriteria.push('CHEQUE_NUMBER');
-          matchedCriteria.push('TRANSACTION_DATE');
-
-          const newMatch = await prisma.$transaction(async (tx) => {
-            const m = await tx.reconciliationMatch.create({
-              data: {
-                reconciliationPeriodId: periodId,
-                matchType: 'ONE_TO_ONE',
-                matchStatus: 'CONFIRMED',
-                confidenceScore: new Prisma.Decimal(0.98),
-                criteriaMatched: JSON.stringify(matchedCriteria),
-                explanation: `Auto-matched: Amount (${bAmount.toString()}), Reference, and Date aligned`,
-                createdByType: 'SYSTEM',
-                createdById: req.user?.id,
-              },
-            });
-
-            await tx.bankTransactionMatch.create({
-              data: { matchId: m.id, bankTransactionId: bTx.id, allocatedAmount: bAmount },
-            });
-            await tx.glTransactionMatch.create({
-              data: { matchId: m.id, glTransactionId: gTx.id, allocatedAmount: gAmount },
-            });
-
-            await tx.bankTransaction.update({ where: { id: bTx.id }, data: { status: 'MATCHED' } });
-            await tx.glTransaction.update({ where: { id: gTx.id }, data: { status: 'MATCHED' } });
-
-            return m;
-          });
-
-          bTx.status = 'MATCHED';
-          gTx.status = 'MATCHED';
-          createdMatches.push(newMatch);
-          break;
-        }
-      }
-    }
-
-    res.json({
-      proposedCount: createdMatches.length,
-      matches: createdMatches,
-      message: `Rule engine evaluated transactions and matched ${createdMatches.length} pairs.`,
-    });
-  } catch (error) {
-    console.error('Error proposing auto-matches:', error);
-    res.status(500).json({ error: 'Failed to run auto-match engine' });
-  }
+  return res.status(501).json({
+    status: 'DEFERRED',
+    error: 'Not Implemented',
+    phase: 'PHASE_3_DEFERRED',
+    message:
+      'Automatic reconciliation engine execution is deferred to Phase 3 (Reconciliation Engine). Phase 1 provides the complete reconciliation foundation, 9 matching criteria, organization control thresholds (min 3 total, min 2 strong), configurable rules and multi-tier tolerances, and manual matching workflows.',
+  });
 };
 
 reconciliationRouter.post('/:id/propose-auto-matches', requirePermission('reconcile'), proposeAutoMatchesHandler);

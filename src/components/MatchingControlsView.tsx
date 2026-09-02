@@ -53,10 +53,17 @@ export const MatchingControlsView: React.FC<MatchingControlsViewProps> = ({
     <div className="space-y-6">
       {/* Header */}
       <div>
-        <h2 className="text-lg font-bold text-stone-900">Matching Criteria, Controls & Tolerances</h2>
-        <p className="text-xs text-stone-500">
-          Configure rule priorities, strong vs additional criterion weights, and multi-tier variance tolerances
-        </p>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-lg font-bold text-stone-900">Matching Criteria, Controls & Tolerances</h2>
+            <p className="text-xs text-stone-500">
+              Configure rule priorities, strong vs additional criterion weights, and multi-tier variance tolerances
+            </p>
+          </div>
+          <span className="inline-flex items-center px-2.5 py-1 rounded-md text-[11px] font-semibold bg-stone-100 text-stone-800 border border-stone-300">
+            Phase 1 Foundation: Criteria, Controls & Manual Matching Active • Auto-Engine Scheduled for Phase 3
+          </span>
+        </div>
       </div>
 
       {/* Criteria Weight & Strong Flag Directory */}
