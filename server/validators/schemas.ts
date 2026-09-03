@@ -91,7 +91,7 @@ export const ResolveExceptionSchema = z.object({
 });
 
 export const SubmitApprovalSchema = z.object({
-  stage: z.enum(['PREPARED', 'REVIEWED', 'APPROVED', 'CLOSED']),
+  stage: z.enum(['PREPARED', 'REVIEWED', 'APPROVED', 'CLOSED']).optional(),
   action: z.enum(['SUBMIT_PREPARATION', 'SUBMIT_REVIEW', 'APPROVE', 'REJECT', 'CLOSE', 'REOPEN']),
   comments: z.string().optional(),
 });

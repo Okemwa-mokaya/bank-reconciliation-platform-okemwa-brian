@@ -232,6 +232,20 @@ export const createMatchHandler = async (req: any, res: any) => {
     }
 
     // 2. MATCH TOPOLOGY VALIDATION
+    const supportedMatchTypes = [
+      'ONE_TO_ONE',
+      'ONE_TO_MANY',
+      'MANY_TO_ONE',
+      'MANY_TO_MANY',
+      'MANUAL',
+      'ADJUSTMENT',
+    ];
+    if (!supportedMatchTypes.includes(matchType)) {
+      return res.status(400).json({
+        error: `Invalid match type: ${matchType}. Supported types are ONE_TO_ONE, ONE_TO_MANY, MANY_TO_ONE, MANY_TO_MANY`,
+      });
+    }
+
     if (matchType === 'ONE_TO_ONE') {
       if (bankTransactionIds.length !== 1 || glTransactionIds.length !== 1) {
         return res.status(400).json({
@@ -261,10 +275,15 @@ export const createMatchHandler = async (req: any, res: any) => {
     // 3. MATCHING RULE ORGANIZATION VERIFICATION
     if (matchingRuleId) {
       const rule = await prisma.matchingRule.findFirst({
-        where: { id: matchingRuleId, organizationId: orgId },
+        where: { id: matchingRuleId },
       });
       if (!rule) {
-        return res.status(404).json({ error: 'Matching rule not found in organization' });
+        return res.status(404).json({ error: 'Matching rule not found' });
+      }
+      if (rule.organizationId !== orgId) {
+        return res.status(403).json({
+          error: 'Tenant isolation violation: Matching rule belongs to another organization',
+        });
       }
     }
 
@@ -354,6 +373,9 @@ export const createMatchHandler = async (req: any, res: any) => {
         },
       });
 
+      let totalBankAllocated = new Prisma.Decimal(0);
+      let totalGlAllocated = new Prisma.Decimal(0);
+
       // Link Bank Transactions with allocation integrity
       for (const bTx of bankTxs) {
         const bId = bTx.id;
@@ -378,6 +400,8 @@ export const createMatchHandler = async (req: any, res: any) => {
             `Allocated amount (${allocation.toString()}) exceeds available amount (${availableAmount.toString()}) for bank transaction ${bId}`
           );
         }
+
+        totalBankAllocated = totalBankAllocated.plus(allocation);
 
         await tx.bankTransactionMatch.create({
           data: {
@@ -420,6 +444,8 @@ export const createMatchHandler = async (req: any, res: any) => {
           );
         }
 
+        totalGlAllocated = totalGlAllocated.plus(allocation);
+
         await tx.glTransactionMatch.create({
           data: {
             matchId: createdMatch.id,
@@ -434,6 +460,13 @@ export const createMatchHandler = async (req: any, res: any) => {
           where: { id: gId },
           data: { status: newStatus },
         });
+      }
+
+      // Group Balance Integrity: total bank allocated amount = total GL allocated amount
+      if (matchType !== 'ADJUSTMENT' && !totalBankAllocated.equals(totalGlAllocated)) {
+        throw new Error(
+          `Group balance mismatch: total bank allocated (${totalBankAllocated.toString()}) does not equal total GL allocated (${totalGlAllocated.toString()})`
+        );
       }
 
       // Update Period status to PROCESSING / RECONCILED if it was NOT_STARTED
@@ -473,7 +506,13 @@ export const createMatchHandler = async (req: any, res: any) => {
 
     res.status(201).json({ match: fullMatch });
   } catch (error: any) {
-    if (error.message && (error.message.includes('Allocation amount') || error.message.includes('Allocated amount'))) {
+    if (
+      error.message &&
+      (error.message.includes('Allocation amount') ||
+       error.message.includes('Allocated amount') ||
+       error.message.includes('Group balance') ||
+       error.message.includes('mismatch'))
+    ) {
       return res.status(400).json({ error: error.message });
     }
     console.error('Error creating match:', error);
@@ -605,38 +644,11 @@ export const submitApprovalHandler = async (req: any, res: any) => {
       }
     }
 
-    // 2. STAGE & ACTION ALIGNMENT VALIDATION
-    if (validated.action === 'SUBMIT_PREPARATION' && validated.stage !== 'PREPARED') {
-      return res.status(400).json({
-        error: `Inconsistent workflow: Action 'SUBMIT_PREPARATION' requires stage 'PREPARED', received '${validated.stage}'`,
-      });
-    }
-    if (validated.action === 'SUBMIT_REVIEW' && validated.stage !== 'REVIEWED') {
-      return res.status(400).json({
-        error: `Inconsistent workflow: Action 'SUBMIT_REVIEW' requires stage 'REVIEWED', received '${validated.stage}'`,
-      });
-    }
-    if (validated.action === 'APPROVE' && validated.stage !== 'APPROVED') {
-      return res.status(400).json({
-        error: `Inconsistent workflow: Action 'APPROVE' requires stage 'APPROVED', received '${validated.stage}'`,
-      });
-    }
-    if (validated.action === 'CLOSE' && validated.stage !== 'CLOSED') {
-      return res.status(400).json({
-        error: `Inconsistent workflow: Action 'CLOSE' requires stage 'CLOSED', received '${validated.stage}'`,
-      });
-    }
-    if (validated.action === 'REJECT' && !['REVIEWED', 'APPROVED'].includes(validated.stage)) {
-      return res.status(400).json({
-        error: `Inconsistent workflow: Action 'REJECT' is only permitted during 'REVIEWED' or 'APPROVED' stages, received '${validated.stage}'`,
-      });
-    }
-
     let nextStatus = period.status;
     let isLocked = period.isLocked;
     const updateData: Record<string, unknown> = {};
 
-    // 3. STRICT WORKFLOW STATE MACHINE VALIDATION
+    // 2. STRICT WORKFLOW STATE MACHINE VALIDATION AUTHORITATIVELY FROM period.status
     if (validated.action === 'SUBMIT_PREPARATION') {
       const allowedPrior = ['NOT_STARTED', 'PROCESSING', 'RECONCILED', 'EXCEPTIONS'];
       if (!allowedPrior.includes(period.status)) {
@@ -699,6 +711,8 @@ export const submitApprovalHandler = async (req: any, res: any) => {
       return res.status(400).json({ error: `Unknown workflow action: ${validated.action}` });
     }
 
+    const recordedStage = validated.stage || (period.status === 'NOT_STARTED' || period.status === 'PROCESSING' ? 'PREPARED' : period.status);
+
     updateData.status = nextStatus;
     updateData.isLocked = isLocked;
 
@@ -706,7 +720,7 @@ export const submitApprovalHandler = async (req: any, res: any) => {
       prisma.approvalWorkflow.create({
         data: {
           reconciliationPeriodId: periodId,
-          stage: validated.stage,
+          stage: recordedStage,
           action: validated.action,
           status: validated.action === 'REJECT' ? 'REJECTED' : 'APPROVED',
           userId: req.user!.id,
@@ -731,7 +745,7 @@ export const submitApprovalHandler = async (req: any, res: any) => {
       entityType: 'ReconciliationPeriod',
       entityId: periodId,
       previousValue: { status: period.status, isLocked: period.isLocked },
-      newValue: { status: nextStatus, isLocked, stage: validated.stage },
+      newValue: { status: nextStatus, isLocked, stage: recordedStage },
       reason: validated.comments || `Approval stage action executed: ${validated.action}`,
     });
 

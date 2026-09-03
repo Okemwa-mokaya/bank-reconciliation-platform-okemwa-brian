@@ -5,7 +5,7 @@ import { Prisma } from '@prisma/client';
 
 export const dashboardRouter = Router();
 
-dashboardRouter.get('/summary', requirePermission('view_dashboard'), async (req, res) => {
+export const getDashboardSummaryHandler = async (req: any, res: any) => {
   try {
     const orgId = req.organization!.id;
 
@@ -156,4 +156,6 @@ dashboardRouter.get('/summary', requirePermission('view_dashboard'), async (req,
     console.error('Error computing dashboard summary:', error);
     res.status(500).json({ error: 'Failed to generate dashboard summary' });
   }
-});
+};
+
+dashboardRouter.get('/summary', requirePermission('view_dashboard'), getDashboardSummaryHandler);
