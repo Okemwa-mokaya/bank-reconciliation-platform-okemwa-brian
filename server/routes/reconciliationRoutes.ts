@@ -231,6 +231,18 @@ export const createMatchHandler = async (req: any, res: any) => {
       return res.status(400).json({ error: 'Match must contain at least one bank or GL transaction' });
     }
 
+    // Reject duplicate IDs before topology validation
+    if (new Set(bankTransactionIds).size !== bankTransactionIds.length) {
+      return res.status(400).json({
+        error: 'Duplicate bank transaction IDs are not permitted in match request',
+      });
+    }
+    if (new Set(glTransactionIds).size !== glTransactionIds.length) {
+      return res.status(400).json({
+        error: 'Duplicate GL transaction IDs are not permitted in match request',
+      });
+    }
+
     // 2. MATCH TOPOLOGY VALIDATION
     const supportedMatchTypes = [
       'ONE_TO_ONE',
@@ -400,8 +412,12 @@ export const createMatchHandler = async (req: any, res: any) => {
         const remainingAmount = absSigned.minus(priorAllocated);
 
         let allocation: Prisma.Decimal;
-        if (bankAllocations && bankAllocations[bId] !== undefined && bankAllocations[bId] !== null) {
+        if (bankAllocations && bankAllocations[bId] !== undefined && bankAllocations[bId] !== null && bankAllocations[bId] !== '') {
           allocation = new Prisma.Decimal(bankAllocations[bId]);
+        } else if (bTx.status === 'PARTIALLY_MATCHED') {
+          throw new Error(
+            `Bank transaction ${bId} is PARTIALLY_MATCHED and requires an explicit allocation amount in bankAllocations`
+          );
         } else {
           allocation = remainingAmount;
         }
@@ -440,8 +456,12 @@ export const createMatchHandler = async (req: any, res: any) => {
         const remainingAmount = absAmount.minus(priorAllocated);
 
         let allocation: Prisma.Decimal;
-        if (glAllocations && glAllocations[gId] !== undefined && glAllocations[gId] !== null) {
+        if (glAllocations && glAllocations[gId] !== undefined && glAllocations[gId] !== null && glAllocations[gId] !== '') {
           allocation = new Prisma.Decimal(glAllocations[gId]);
+        } else if (gTx.status === 'PARTIALLY_MATCHED') {
+          throw new Error(
+            `GL transaction ${gId} is PARTIALLY_MATCHED and requires an explicit allocation amount in glAllocations`
+          );
         } else {
           allocation = remainingAmount;
         }
@@ -570,7 +590,7 @@ reconciliationRouter.post('/:id/matches', requirePermission('manually_match'), c
 reconciliationRouter.post('/periods/:id/matches', requirePermission('manually_match'), createMatchHandler);
 
 // Unmatch an existing match group
-const unmatchHandler = async (req: any, res: any) => {
+export const unmatchHandler = async (req: any, res: any) => {
   try {
     const orgId = req.organization!.id;
     const { id: periodId } = req.params;
@@ -605,28 +625,74 @@ const unmatchHandler = async (req: any, res: any) => {
     }
 
     await prisma.$transaction(async (tx) => {
-      // Revert bank transactions to UNMATCHED
-      for (const btm of match.bankTransactions) {
-        await tx.bankTransaction.update({
-          where: { id: btm.bankTransactionId },
-          data: { status: 'UNMATCHED' },
-        });
-      }
-
-      // Revert GL transactions to UNMATCHED
-      for (const gtm of match.glTransactions) {
-        await tx.glTransaction.update({
-          where: { id: gtm.glTransactionId },
-          data: { status: 'UNMATCHED' },
-        });
-      }
-
-      // Delete junction entries
+      // 1. Delete junction entries first
       await tx.bankTransactionMatch.deleteMany({ where: { matchId } });
       await tx.glTransactionMatch.deleteMany({ where: { matchId } });
 
-      // Delete match record
+      // 2. Delete match record
       await tx.reconciliationMatch.delete({ where: { id: matchId } });
+
+      // 3. Recalculate status for affected bank transactions based on remaining allocations
+      const affectedBankTxIds = Array.from(new Set(match.bankTransactions.map((b) => b.bankTransactionId)));
+      for (const bId of affectedBankTxIds) {
+        const bTx = await tx.bankTransaction.findUnique({
+          where: { id: bId },
+        });
+        if (!bTx) continue;
+
+        const remainingAllocations = await tx.bankTransactionMatch.aggregate({
+          where: { bankTransactionId: bId },
+          _sum: { allocatedAmount: true },
+        });
+        const remainingAllocated = remainingAllocations._sum.allocatedAmount || new Prisma.Decimal(0);
+        const signedDecimal = new Prisma.Decimal(bTx.signedAmount);
+        const absSigned = signedDecimal.isNegative() ? signedDecimal.negated() : signedDecimal;
+
+        let newStatus: string;
+        if (remainingAllocated.isZero()) {
+          newStatus = 'UNMATCHED';
+        } else if (remainingAllocated.lt(absSigned)) {
+          newStatus = 'PARTIALLY_MATCHED';
+        } else {
+          newStatus = 'MATCHED';
+        }
+
+        await tx.bankTransaction.update({
+          where: { id: bId },
+          data: { status: newStatus },
+        });
+      }
+
+      // 4. Recalculate status for affected GL transactions based on remaining allocations
+      const affectedGlTxIds = Array.from(new Set(match.glTransactions.map((g) => g.glTransactionId)));
+      for (const gId of affectedGlTxIds) {
+        const gTx = await tx.glTransaction.findUnique({
+          where: { id: gId },
+        });
+        if (!gTx) continue;
+
+        const remainingAllocations = await tx.glTransactionMatch.aggregate({
+          where: { glTransactionId: gId },
+          _sum: { allocatedAmount: true },
+        });
+        const remainingAllocated = remainingAllocations._sum.allocatedAmount || new Prisma.Decimal(0);
+        const amountDecimal = new Prisma.Decimal(gTx.amount);
+        const absAmount = amountDecimal.isNegative() ? amountDecimal.negated() : amountDecimal;
+
+        let newStatus: string;
+        if (remainingAllocated.isZero()) {
+          newStatus = 'UNMATCHED';
+        } else if (remainingAllocated.lt(absAmount)) {
+          newStatus = 'PARTIALLY_MATCHED';
+        } else {
+          newStatus = 'MATCHED';
+        }
+
+        await tx.glTransaction.update({
+          where: { id: gId },
+          data: { status: newStatus },
+        });
+      }
     });
 
     await recordAuditEvent({

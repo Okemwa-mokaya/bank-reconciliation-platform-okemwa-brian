@@ -4,6 +4,7 @@ import { prisma } from '../server/db';
 import {
   proposeAutoMatchesHandler,
   createMatchHandler,
+  unmatchHandler,
   submitApprovalHandler,
 } from '../server/routes/reconciliationRoutes';
 import { createExceptionHandler } from '../server/routes/exceptionRoutes';
@@ -1005,6 +1006,395 @@ describe('Manual Matching Topology & Status Validation', () => {
     await createMatchHandler(req as any, res as any);
     expect(res.statusCode).toBe(400);
     expect(res.jsonData.error).toContain('Group balance mismatch');
+  });
+
+  it('duplicate bank transaction IDs = HTTP 400', async () => {
+    setupMockPeriod();
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'u-1', email: 'acct@org.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
+      body: {
+        matchType: 'MANY_TO_ONE',
+        bankTransactionIds: ['bank-1', 'bank-1'],
+        glTransactionIds: ['gl-1'],
+      },
+    };
+    const res = createMockRes();
+
+    await createMatchHandler(req as any, res as any);
+    expect(res.statusCode).toBe(400);
+    expect(res.jsonData.error).toContain('Duplicate bank transaction IDs');
+  });
+
+  it('duplicate GL transaction IDs = HTTP 400', async () => {
+    setupMockPeriod();
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'u-1', email: 'acct@org.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
+      body: {
+        matchType: 'ONE_TO_MANY',
+        bankTransactionIds: ['bank-1'],
+        glTransactionIds: ['gl-1', 'gl-1'],
+      },
+    };
+    const res = createMockRes();
+
+    await createMatchHandler(req as any, res as any);
+    expect(res.statusCode).toBe(400);
+    expect(res.jsonData.error).toContain('Duplicate GL transaction IDs');
+  });
+
+  it('PARTIALLY_MATCHED GL transaction without explicit allocation = HTTP 400', async () => {
+    setupMockPeriod();
+    vi.spyOn(prisma.bankTransaction, 'findMany').mockResolvedValue([
+      {
+        id: 'btx-1',
+        organizationId: 'org-1',
+        bankAccountId: 'acc-1',
+        status: 'UNMATCHED',
+        signedAmount: new Prisma.Decimal('500.00'),
+      } as any,
+    ]);
+    vi.spyOn(prisma.glTransaction, 'findMany').mockResolvedValue([
+      {
+        id: 'gtx-1',
+        organizationId: 'org-1',
+        bankAccountId: 'acc-1',
+        status: 'PARTIALLY_MATCHED',
+        amount: new Prisma.Decimal('500.00'),
+      } as any,
+    ]);
+
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'u-1', email: 'acct@org.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
+      body: {
+        matchType: 'ONE_TO_ONE',
+        bankTransactionIds: ['btx-1'],
+        glTransactionIds: ['gtx-1'],
+        // glAllocations missing for PARTIALLY_MATCHED
+      },
+    };
+    const res = createMockRes();
+
+    await createMatchHandler(req as any, res as any);
+    expect(res.statusCode).toBe(400);
+    expect(res.jsonData.error).toContain('requires an explicit allocation amount in glAllocations');
+  });
+
+  it('PARTIALLY_MATCHED with valid explicit allocation = HTTP 201', async () => {
+    setupMockPeriod();
+    vi.spyOn(prisma.bankTransaction, 'findMany').mockResolvedValue([
+      {
+        id: 'btx-1',
+        organizationId: 'org-1',
+        bankAccountId: 'acc-1',
+        status: 'PARTIALLY_MATCHED',
+        signedAmount: new Prisma.Decimal('1000.00'),
+      } as any,
+    ]);
+    vi.spyOn(prisma.glTransaction, 'findMany').mockResolvedValue([
+      {
+        id: 'gtx-1',
+        organizationId: 'org-1',
+        bankAccountId: 'acc-1',
+        status: 'UNMATCHED',
+        amount: new Prisma.Decimal('400.00'),
+      } as any,
+    ]);
+
+    const bankTxUpdateSpy = vi.fn().mockResolvedValue({});
+    const glTxUpdateSpy = vi.fn().mockResolvedValue({});
+
+    vi.spyOn(prisma, '$transaction').mockImplementation(async (cb: any) => {
+      return cb({
+        reconciliationMatch: { create: vi.fn().mockResolvedValue({ id: 'm-partial' }) },
+        bankTransactionMatch: {
+          aggregate: vi.fn().mockResolvedValue({ _sum: { allocatedAmount: new Prisma.Decimal('500.00') } }),
+          create: vi.fn().mockResolvedValue({ id: 'btxm-1' }),
+        },
+        glTransactionMatch: {
+          aggregate: vi.fn().mockResolvedValue({ _sum: { allocatedAmount: new Prisma.Decimal('0') } }),
+          create: vi.fn().mockResolvedValue({ id: 'gtxm-1' }),
+        },
+        bankTransaction: { update: bankTxUpdateSpy },
+        glTransaction: { update: glTxUpdateSpy },
+        reconciliationPeriod: { update: vi.fn().mockResolvedValue({}) },
+      });
+    });
+
+    vi.spyOn(prisma.reconciliationMatch, 'findUnique').mockResolvedValue({
+      id: 'm-partial',
+      matchType: 'ONE_TO_ONE',
+      bankTransactions: [{ bankTransactionId: 'btx-1' }],
+      glTransactions: [{ glTransactionId: 'gtx-1' }],
+    } as any);
+    vi.spyOn(prisma.auditEvent, 'create').mockResolvedValue({} as any);
+
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'u-1', email: 'acct@org.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
+      body: {
+        matchType: 'ONE_TO_ONE',
+        bankTransactionIds: ['btx-1'],
+        glTransactionIds: ['gtx-1'],
+        bankAllocations: { 'btx-1': '400.00' },
+        glAllocations: { 'gtx-1': '400.00' },
+      },
+    };
+    const res = createMockRes();
+
+    await createMatchHandler(req as any, res as any);
+    expect(res.statusCode).toBe(201);
+    expect(res.jsonData.match.id).toBe('m-partial');
+    // Verify bank transaction was updated to PARTIALLY_MATCHED because 500 + 400 = 900 < 1000
+    expect(bankTxUpdateSpy).toHaveBeenCalledWith({
+      where: { id: 'btx-1' },
+      data: { status: 'PARTIALLY_MATCHED' },
+    });
+    // GL transaction was updated to MATCHED because 0 + 400 = 400 == 400
+    expect(glTxUpdateSpy).toHaveBeenCalledWith({
+      where: { id: 'gtx-1' },
+      data: { status: 'MATCHED' },
+    });
+  });
+});
+
+describe('Production Unmatch Status Recalculation Tests', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const setupMockPeriod = () => {
+    vi.spyOn(prisma.reconciliationPeriod, 'findFirst').mockResolvedValue({
+      id: 'p-1',
+      organizationId: 'org-1',
+      bankAccountId: 'acc-1',
+      status: 'PROCESSING',
+      isLocked: false,
+    } as any);
+  };
+
+  it('Unmatching a transaction with remaining allocation recalculates status to PARTIALLY_MATCHED', async () => {
+    setupMockPeriod();
+    vi.spyOn(prisma.reconciliationMatch, 'findFirst').mockResolvedValue({
+      id: 'match-1',
+      reconciliationPeriodId: 'p-1',
+      bankTransactions: [{ bankTransactionId: 'btx-1' }],
+      glTransactions: [{ glTransactionId: 'gtx-1' }],
+    } as any);
+
+    const bankTxUpdateSpy = vi.fn().mockResolvedValue({});
+    const glTxUpdateSpy = vi.fn().mockResolvedValue({});
+    const btxmDeleteManySpy = vi.fn().mockResolvedValue({ count: 1 });
+    const gtxmDeleteManySpy = vi.fn().mockResolvedValue({ count: 1 });
+    const matchDeleteSpy = vi.fn().mockResolvedValue({});
+
+    vi.spyOn(prisma, '$transaction').mockImplementation(async (cb: any) => {
+      return cb({
+        bankTransactionMatch: {
+          deleteMany: btxmDeleteManySpy,
+          aggregate: vi.fn().mockResolvedValue({
+            // Remaining allocation of 200 after match-1 junction record deletion
+            _sum: { allocatedAmount: new Prisma.Decimal('200.00') },
+          }),
+        },
+        glTransactionMatch: {
+          deleteMany: gtxmDeleteManySpy,
+          aggregate: vi.fn().mockResolvedValue({
+            // Remaining allocation of 200 after match-1 junction record deletion
+            _sum: { allocatedAmount: new Prisma.Decimal('200.00') },
+          }),
+        },
+        reconciliationMatch: {
+          delete: matchDeleteSpy,
+        },
+        bankTransaction: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: 'btx-1',
+            signedAmount: new Prisma.Decimal('500.00'),
+          }),
+          update: bankTxUpdateSpy,
+        },
+        glTransaction: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: 'gtx-1',
+            amount: new Prisma.Decimal('500.00'),
+          }),
+          update: glTxUpdateSpy,
+        },
+      });
+    });
+
+    vi.spyOn(prisma.auditEvent, 'create').mockResolvedValue({} as any);
+
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'u-1', email: 'acct@org.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
+      body: { matchId: 'match-1' },
+    };
+    const res = createMockRes();
+
+    await unmatchHandler(req as any, res as any);
+    expect(res.statusCode).toBe(200);
+    expect(res.jsonData.success).toBe(true);
+
+    // Remaining allocation is 200.00 out of 500.00 => PARTIALLY_MATCHED
+    expect(bankTxUpdateSpy).toHaveBeenCalledWith({
+      where: { id: 'btx-1' },
+      data: { status: 'PARTIALLY_MATCHED' },
+    });
+    expect(glTxUpdateSpy).toHaveBeenCalledWith({
+      where: { id: 'gtx-1' },
+      data: { status: 'PARTIALLY_MATCHED' },
+    });
+  });
+
+  it('Unmatching the final allocation recalculates status to UNMATCHED', async () => {
+    setupMockPeriod();
+    vi.spyOn(prisma.reconciliationMatch, 'findFirst').mockResolvedValue({
+      id: 'match-final',
+      reconciliationPeriodId: 'p-1',
+      bankTransactions: [{ bankTransactionId: 'btx-1' }],
+      glTransactions: [{ glTransactionId: 'gtx-1' }],
+    } as any);
+
+    const bankTxUpdateSpy = vi.fn().mockResolvedValue({});
+    const glTxUpdateSpy = vi.fn().mockResolvedValue({});
+
+    vi.spyOn(prisma, '$transaction').mockImplementation(async (cb: any) => {
+      return cb({
+        bankTransactionMatch: {
+          deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
+          aggregate: vi.fn().mockResolvedValue({
+            // Zero remaining allocation
+            _sum: { allocatedAmount: new Prisma.Decimal('0.00') },
+          }),
+        },
+        glTransactionMatch: {
+          deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
+          aggregate: vi.fn().mockResolvedValue({
+            _sum: { allocatedAmount: new Prisma.Decimal('0.00') },
+          }),
+        },
+        reconciliationMatch: {
+          delete: vi.fn().mockResolvedValue({}),
+        },
+        bankTransaction: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: 'btx-1',
+            signedAmount: new Prisma.Decimal('500.00'),
+          }),
+          update: bankTxUpdateSpy,
+        },
+        glTransaction: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: 'gtx-1',
+            amount: new Prisma.Decimal('500.00'),
+          }),
+          update: glTxUpdateSpy,
+        },
+      });
+    });
+
+    vi.spyOn(prisma.auditEvent, 'create').mockResolvedValue({} as any);
+
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'u-1', email: 'acct@org.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
+      body: { matchId: 'match-final' },
+    };
+    const res = createMockRes();
+
+    await unmatchHandler(req as any, res as any);
+    expect(res.statusCode).toBe(200);
+
+    // Remaining allocation is 0.00 => UNMATCHED
+    expect(bankTxUpdateSpy).toHaveBeenCalledWith({
+      where: { id: 'btx-1' },
+      data: { status: 'UNMATCHED' },
+    });
+    expect(glTxUpdateSpy).toHaveBeenCalledWith({
+      where: { id: 'gtx-1' },
+      data: { status: 'UNMATCHED' },
+    });
+  });
+
+  it('Fully allocated transaction remains MATCHED when another unrelated match is removed', async () => {
+    setupMockPeriod();
+    vi.spyOn(prisma.reconciliationMatch, 'findFirst').mockResolvedValue({
+      id: 'match-2',
+      reconciliationPeriodId: 'p-1',
+      bankTransactions: [{ bankTransactionId: 'btx-2' }],
+      glTransactions: [{ glTransactionId: 'gtx-2' }],
+    } as any);
+
+    const bankTxUpdateSpy = vi.fn().mockResolvedValue({});
+    const glTxUpdateSpy = vi.fn().mockResolvedValue({});
+
+    vi.spyOn(prisma, '$transaction').mockImplementation(async (cb: any) => {
+      return cb({
+        bankTransactionMatch: {
+          deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
+          aggregate: vi.fn().mockResolvedValue({
+            // Full allocation remaining from other match groups
+            _sum: { allocatedAmount: new Prisma.Decimal('1000.00') },
+          }),
+        },
+        glTransactionMatch: {
+          deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
+          aggregate: vi.fn().mockResolvedValue({
+            _sum: { allocatedAmount: new Prisma.Decimal('1000.00') },
+          }),
+        },
+        reconciliationMatch: {
+          delete: vi.fn().mockResolvedValue({}),
+        },
+        bankTransaction: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: 'btx-2',
+            signedAmount: new Prisma.Decimal('1000.00'),
+          }),
+          update: bankTxUpdateSpy,
+        },
+        glTransaction: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: 'gtx-2',
+            amount: new Prisma.Decimal('1000.00'),
+          }),
+          update: glTxUpdateSpy,
+        },
+      });
+    });
+
+    vi.spyOn(prisma.auditEvent, 'create').mockResolvedValue({} as any);
+
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'u-1', email: 'acct@org.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
+      body: { matchId: 'match-2' },
+    };
+    const res = createMockRes();
+
+    await unmatchHandler(req as any, res as any);
+    expect(res.statusCode).toBe(200);
+
+    // Remaining allocation equals full amount => MATCHED
+    expect(bankTxUpdateSpy).toHaveBeenCalledWith({
+      where: { id: 'btx-2' },
+      data: { status: 'MATCHED' },
+    });
+    expect(glTxUpdateSpy).toHaveBeenCalledWith({
+      where: { id: 'gtx-2' },
+      data: { status: 'MATCHED' },
+    });
   });
 });
 

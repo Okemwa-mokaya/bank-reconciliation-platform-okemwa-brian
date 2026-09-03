@@ -41,7 +41,7 @@ The codebase is organized into modular layers with clear boundaries:
 
 ```
 ├── prisma/
-│   ├── schema.prisma           # PostgreSQL relational schema (16 models, constraints, indexes)
+│   ├── schema.prisma           # PostgreSQL relational schema (24 models, constraints, indexes)
 │   ├── migrations/             # Standard PostgreSQL migration SQL scripts
 │   └── migrations/migration_lock.toml # Declares PostgreSQL provider
 ├── server/
