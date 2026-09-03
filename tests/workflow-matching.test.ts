@@ -1162,6 +1162,165 @@ describe('Manual Matching Topology & Status Validation', () => {
       data: { status: 'MATCHED' },
     });
   });
+
+  it('invalid ONE_TO_MANY with zero bank transactions is rejected', async () => {
+    setupMockPeriod();
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'u-1', email: 'acct@org.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
+      body: {
+        matchType: 'ONE_TO_MANY',
+        bankTransactionIds: [],
+        glTransactionIds: ['gtx-1', 'gtx-2'],
+      },
+    };
+    const res = createMockRes();
+
+    await createMatchHandler(req as any, res as any);
+    expect(res.statusCode).toBe(400);
+    expect(res.jsonData.error).toContain('Invalid match topology: ONE_TO_MANY');
+  });
+
+  it('allocation <= 0 is rejected for bank transaction', async () => {
+    setupMockPeriod();
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'u-1', email: 'acct@org.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
+      body: {
+        matchType: 'ONE_TO_ONE',
+        bankTransactionIds: ['btx-1'],
+        glTransactionIds: ['gtx-1'],
+        bankAllocations: { 'btx-1': '0' },
+      },
+    };
+    const res = createMockRes();
+
+    await createMatchHandler(req as any, res as any);
+    expect(res.statusCode).toBe(400);
+    expect(res.jsonData.error).toContain('must be greater than zero');
+  });
+
+  it('allocation <= 0 is rejected for GL transaction', async () => {
+    setupMockPeriod();
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'u-1', email: 'acct@org.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
+      body: {
+        matchType: 'ONE_TO_ONE',
+        bankTransactionIds: ['btx-1'],
+        glTransactionIds: ['gtx-1'],
+        glAllocations: { 'gtx-1': '-10.00' },
+      },
+    };
+    const res = createMockRes();
+
+    await createMatchHandler(req as any, res as any);
+    expect(res.statusCode).toBe(400);
+    expect(res.jsonData.error).toContain('must be greater than zero');
+  });
+
+  it('isPartial request without explicit allocation is rejected', async () => {
+    setupMockPeriod();
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'u-1', email: 'acct@org.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
+      body: {
+        matchType: 'ONE_TO_ONE',
+        bankTransactionIds: ['btx-1'],
+        glTransactionIds: ['gtx-1'],
+        isPartial: true,
+      },
+    };
+    const res = createMockRes();
+
+    await createMatchHandler(req as any, res as any);
+    expect(res.statusCode).toBe(400);
+    expect(res.jsonData.error).toContain('Explicit allocation amount is required for partial match');
+  });
+
+  it('multiple match groups correctly contribute to total allocation', async () => {
+    setupMockPeriod();
+    vi.spyOn(prisma.bankTransaction, 'findMany').mockResolvedValue([
+      {
+        id: 'btx-multigroup',
+        organizationId: 'org-1',
+        bankAccountId: 'acc-1',
+        status: 'PARTIALLY_MATCHED',
+        signedAmount: new Prisma.Decimal('1000.00'),
+      } as any,
+    ]);
+    vi.spyOn(prisma.glTransaction, 'findMany').mockResolvedValue([
+      {
+        id: 'gtx-group2',
+        organizationId: 'org-1',
+        bankAccountId: 'acc-1',
+        status: 'UNMATCHED',
+        amount: new Prisma.Decimal('700.00'),
+      } as any,
+    ]);
+
+    const bankTxUpdateSpy = vi.fn().mockResolvedValue({});
+    const glTxUpdateSpy = vi.fn().mockResolvedValue({});
+
+    vi.spyOn(prisma, '$transaction').mockImplementation(async (cb: any) => {
+      return cb({
+        reconciliationMatch: { create: vi.fn().mockResolvedValue({ id: 'm-group2' }) },
+        bankTransactionMatch: {
+          // Prior allocation from Match Group 1 was 300.00
+          aggregate: vi.fn().mockResolvedValue({ _sum: { allocatedAmount: new Prisma.Decimal('300.00') } }),
+          create: vi.fn().mockResolvedValue({ id: 'btxm-2' }),
+        },
+        glTransactionMatch: {
+          aggregate: vi.fn().mockResolvedValue({ _sum: { allocatedAmount: new Prisma.Decimal('0') } }),
+          create: vi.fn().mockResolvedValue({ id: 'gtxm-2' }),
+        },
+        bankTransaction: { update: bankTxUpdateSpy },
+        glTransaction: { update: glTxUpdateSpy },
+        reconciliationPeriod: { update: vi.fn().mockResolvedValue({}) },
+      });
+    });
+
+    vi.spyOn(prisma.reconciliationMatch, 'findUnique').mockResolvedValue({
+      id: 'm-group2',
+      matchType: 'ONE_TO_ONE',
+      bankTransactions: [{ bankTransactionId: 'btx-multigroup' }],
+      glTransactions: [{ glTransactionId: 'gtx-group2' }],
+    } as any);
+    vi.spyOn(prisma.auditEvent, 'create').mockResolvedValue({} as any);
+
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'u-1', email: 'acct@org.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
+      body: {
+        matchType: 'ONE_TO_ONE',
+        bankTransactionIds: ['btx-multigroup'],
+        glTransactionIds: ['gtx-group2'],
+        bankAllocations: { 'btx-multigroup': '700.00' },
+        glAllocations: { 'gtx-group2': '700.00' },
+      },
+    };
+    const res = createMockRes();
+
+    await createMatchHandler(req as any, res as any);
+    expect(res.statusCode).toBe(201);
+    expect(res.jsonData.match.id).toBe('m-group2');
+
+    // Total allocation across match groups: 300.00 (prior) + 700.00 (current) = 1000.00 == 1000.00 => MATCHED
+    expect(bankTxUpdateSpy).toHaveBeenCalledWith({
+      where: { id: 'btx-multigroup' },
+      data: { status: 'MATCHED' },
+    });
+    // GL transaction: 0 (prior) + 700.00 (current) = 700.00 == 700.00 => MATCHED
+    expect(glTxUpdateSpy).toHaveBeenCalledWith({
+      where: { id: 'gtx-group2' },
+      data: { status: 'MATCHED' },
+    });
+  });
 });
 
 describe('Production Unmatch Status Recalculation Tests', () => {

@@ -227,6 +227,18 @@ export const createMatchHandler = async (req: any, res: any) => {
       return res.status(403).json({ error: 'Cannot create matches on a locked or closed reconciliation period' });
     }
 
+    const isPartialRequested = Boolean(
+      req.body.isPartial ||
+      req.body.partialMatch ||
+      req.body.partial ||
+      req.body.status === 'PARTIALLY_MATCHED' ||
+      req.body.matchStatus === 'PARTIAL'
+    );
+
+    if (!Array.isArray(bankTransactionIds) || !Array.isArray(glTransactionIds)) {
+      return res.status(400).json({ error: 'bankTransactionIds and glTransactionIds must be arrays' });
+    }
+
     if (bankTransactionIds.length === 0 && glTransactionIds.length === 0) {
       return res.status(400).json({ error: 'Match must contain at least one bank or GL transaction' });
     }
@@ -241,6 +253,49 @@ export const createMatchHandler = async (req: any, res: any) => {
       return res.status(400).json({
         error: 'Duplicate GL transaction IDs are not permitted in match request',
       });
+    }
+
+    if (isPartialRequested) {
+      const hasBankAlloc = bankAllocations && typeof bankAllocations === 'object' && Object.keys(bankAllocations).length > 0;
+      const hasGlAlloc = glAllocations && typeof glAllocations === 'object' && Object.keys(glAllocations).length > 0;
+      if (!hasBankAlloc && !hasGlAlloc) {
+        return res.status(400).json({
+          error: 'Explicit allocation amount is required for partial match',
+        });
+      }
+    }
+
+    if (bankAllocations && typeof bankAllocations === 'object') {
+      for (const [id, alloc] of Object.entries(bankAllocations)) {
+        try {
+          const dec = new Prisma.Decimal(alloc as any);
+          if (dec.lte(0)) {
+            return res.status(400).json({
+              error: `Allocation amount must be greater than zero for bank transaction ${id}`,
+            });
+          }
+        } catch (e: any) {
+          return res.status(400).json({
+            error: `Invalid allocation amount format for bank transaction ${id}`,
+          });
+        }
+      }
+    }
+    if (glAllocations && typeof glAllocations === 'object') {
+      for (const [id, alloc] of Object.entries(glAllocations)) {
+        try {
+          const dec = new Prisma.Decimal(alloc as any);
+          if (dec.lte(0)) {
+            return res.status(400).json({
+              error: `Allocation amount must be greater than zero for GL transaction ${id}`,
+            });
+          }
+        } catch (e: any) {
+          return res.status(400).json({
+            error: `Invalid allocation amount format for GL transaction ${id}`,
+          });
+        }
+      }
     }
 
     // 2. MATCH TOPOLOGY VALIDATION
@@ -414,7 +469,7 @@ export const createMatchHandler = async (req: any, res: any) => {
         let allocation: Prisma.Decimal;
         if (bankAllocations && bankAllocations[bId] !== undefined && bankAllocations[bId] !== null && bankAllocations[bId] !== '') {
           allocation = new Prisma.Decimal(bankAllocations[bId]);
-        } else if (bTx.status === 'PARTIALLY_MATCHED') {
+        } else if (bTx.status === 'PARTIALLY_MATCHED' || isPartialRequested) {
           throw new Error(
             `Bank transaction ${bId} is PARTIALLY_MATCHED and requires an explicit allocation amount in bankAllocations`
           );
@@ -424,6 +479,11 @@ export const createMatchHandler = async (req: any, res: any) => {
 
         if (allocation.lte(0)) {
           throw new Error(`Allocation amount must be greater than zero for bank transaction ${bId}`);
+        }
+        if (allocation.gt(absSigned)) {
+          throw new Error(
+            `Allocated amount (${allocation.toString()}) exceeds original transaction amount (${absSigned.toString()}) for bank transaction ${bId}`
+          );
         }
         if (allocation.gt(remainingAmount)) {
           throw new Error(
@@ -458,7 +518,7 @@ export const createMatchHandler = async (req: any, res: any) => {
         let allocation: Prisma.Decimal;
         if (glAllocations && glAllocations[gId] !== undefined && glAllocations[gId] !== null && glAllocations[gId] !== '') {
           allocation = new Prisma.Decimal(glAllocations[gId]);
-        } else if (gTx.status === 'PARTIALLY_MATCHED') {
+        } else if (gTx.status === 'PARTIALLY_MATCHED' || isPartialRequested) {
           throw new Error(
             `GL transaction ${gId} is PARTIALLY_MATCHED and requires an explicit allocation amount in glAllocations`
           );
@@ -468,6 +528,11 @@ export const createMatchHandler = async (req: any, res: any) => {
 
         if (allocation.lte(0)) {
           throw new Error(`Allocation amount must be greater than zero for GL transaction ${gId}`);
+        }
+        if (allocation.gt(absAmount)) {
+          throw new Error(
+            `Allocated amount (${allocation.toString()}) exceeds original transaction amount (${absAmount.toString()}) for GL transaction ${gId}`
+          );
         }
         if (allocation.gt(remainingAmount)) {
           throw new Error(
@@ -512,7 +577,14 @@ export const createMatchHandler = async (req: any, res: any) => {
         });
 
         const totalAllocated = priorAllocated.plus(allocation);
-        const newStatus = totalAllocated.gte(absSigned) ? 'MATCHED' : 'PARTIALLY_MATCHED';
+        let newStatus: string;
+        if (totalAllocated.isZero()) {
+          newStatus = 'UNMATCHED';
+        } else if (totalAllocated.lt(absSigned)) {
+          newStatus = 'PARTIALLY_MATCHED';
+        } else {
+          newStatus = 'MATCHED';
+        }
         await tx.bankTransaction.update({
           where: { id: bTx.id },
           data: { status: newStatus },
@@ -529,7 +601,14 @@ export const createMatchHandler = async (req: any, res: any) => {
         });
 
         const totalAllocated = priorAllocated.plus(allocation);
-        const newStatus = totalAllocated.gte(absAmount) ? 'MATCHED' : 'PARTIALLY_MATCHED';
+        let newStatus: string;
+        if (totalAllocated.isZero()) {
+          newStatus = 'UNMATCHED';
+        } else if (totalAllocated.lt(absAmount)) {
+          newStatus = 'PARTIALLY_MATCHED';
+        } else {
+          newStatus = 'MATCHED';
+        }
         await tx.glTransaction.update({
           where: { id: gTx.id },
           data: { status: newStatus },
@@ -576,6 +655,10 @@ export const createMatchHandler = async (req: any, res: any) => {
       error.message &&
       (error.message.includes('Allocation amount') ||
        error.message.includes('Allocated amount') ||
+       error.message.includes('exceeds original transaction amount') ||
+       error.message.includes('exceeds available amount') ||
+       error.message.includes('requires an explicit allocation') ||
+       error.message.includes('Explicit allocation') ||
        error.message.includes('Group balance') ||
        error.message.includes('mismatch'))
     ) {
