@@ -193,6 +193,48 @@ describe('Production Workflow State Machine Tests', () => {
     expect(res.statusCode).toBe(400);
     expect(res.jsonData.error).toContain('closed or locked');
   });
+
+  it('locked period -> REJECT = rejected', async () => {
+    vi.spyOn(prisma.reconciliationPeriod, 'findFirst').mockResolvedValue({
+      id: 'p-1',
+      organizationId: 'org-1',
+      status: 'PREPARED',
+      isLocked: true,
+    } as any);
+
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'user-1', email: 'auditor@org.com', roles: ['AUDITOR'], permissions: ['approve_reconciliation'] },
+      body: { action: 'REJECT', comments: 'Attempting to reject locked period' },
+    };
+    const res = createMockRes();
+
+    await submitApprovalHandler(req as any, res as any);
+    expect(res.statusCode).toBe(400);
+    expect(res.jsonData.error).toContain('closed or locked');
+  });
+
+  it('APPROVED -> REJECT = rejected', async () => {
+    vi.spyOn(prisma.reconciliationPeriod, 'findFirst').mockResolvedValue({
+      id: 'p-1',
+      organizationId: 'org-1',
+      status: 'APPROVED',
+      isLocked: false,
+    } as any);
+
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'user-1', email: 'auditor@org.com', roles: ['AUDITOR'], permissions: ['approve_reconciliation'] },
+      body: { action: 'REJECT', comments: 'Attempting to reject approved period' },
+    };
+    const res = createMockRes();
+
+    await submitApprovalHandler(req as any, res as any);
+    expect(res.statusCode).toBe(400);
+    expect(res.jsonData.error).toContain('Cannot reject period from status APPROVED');
+  });
 });
 
 describe('Manual Matching Topology & Status Validation', () => {
@@ -377,6 +419,44 @@ describe('Manual Matching Topology & Status Validation', () => {
     expect(res.jsonData.match.id).toBe('m-2');
   });
 
+  it('ONE_TO_MANY invalid cardinality rejected (1 bank, 1 GL)', async () => {
+    setupMockPeriod();
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'u-1', email: 'acct@org.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
+      body: {
+        matchType: 'ONE_TO_MANY',
+        bankTransactionIds: ['btx-1'],
+        glTransactionIds: ['gtx-1'],
+      },
+    };
+    const res = createMockRes();
+
+    await createMatchHandler(req as any, res as any);
+    expect(res.statusCode).toBe(400);
+    expect(res.jsonData.error).toContain('Invalid match topology: ONE_TO_MANY');
+  });
+
+  it('ONE_TO_MANY invalid cardinality rejected (2 bank, 2 GL)', async () => {
+    setupMockPeriod();
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'u-1', email: 'acct@org.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
+      body: {
+        matchType: 'ONE_TO_MANY',
+        bankTransactionIds: ['btx-1', 'btx-2'],
+        glTransactionIds: ['gtx-1', 'gtx-2'],
+      },
+    };
+    const res = createMockRes();
+
+    await createMatchHandler(req as any, res as any);
+    expect(res.statusCode).toBe(400);
+    expect(res.jsonData.error).toContain('Invalid match topology: ONE_TO_MANY');
+  });
+
   it('MANY_TO_ONE with 2 bank + 1 GL = allowed', async () => {
     setupMockPeriod();
     vi.spyOn(prisma.bankTransaction, 'findMany').mockResolvedValue([
@@ -443,6 +523,44 @@ describe('Manual Matching Topology & Status Validation', () => {
     await createMatchHandler(req as any, res as any);
     expect(res.statusCode).toBe(201);
     expect(res.jsonData.match.id).toBe('m-3');
+  });
+
+  it('MANY_TO_ONE invalid cardinality rejected (1 bank, 1 GL)', async () => {
+    setupMockPeriod();
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'u-1', email: 'acct@org.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
+      body: {
+        matchType: 'MANY_TO_ONE',
+        bankTransactionIds: ['btx-1'],
+        glTransactionIds: ['gtx-1'],
+      },
+    };
+    const res = createMockRes();
+
+    await createMatchHandler(req as any, res as any);
+    expect(res.statusCode).toBe(400);
+    expect(res.jsonData.error).toContain('Invalid match topology: MANY_TO_ONE');
+  });
+
+  it('MANY_TO_ONE invalid cardinality rejected (2 bank, 2 GL)', async () => {
+    setupMockPeriod();
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'u-1', email: 'acct@org.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
+      body: {
+        matchType: 'MANY_TO_ONE',
+        bankTransactionIds: ['btx-1', 'btx-2'],
+        glTransactionIds: ['gtx-1', 'gtx-2'],
+      },
+    };
+    const res = createMockRes();
+
+    await createMatchHandler(req as any, res as any);
+    expect(res.statusCode).toBe(400);
+    expect(res.jsonData.error).toContain('Invalid match topology: MANY_TO_ONE');
   });
 
   it('MANY_TO_MANY with multiple bank + multiple GL = allowed', async () => {
@@ -518,6 +636,44 @@ describe('Manual Matching Topology & Status Validation', () => {
     await createMatchHandler(req as any, res as any);
     expect(res.statusCode).toBe(201);
     expect(res.jsonData.match.id).toBe('m-4');
+  });
+
+  it('MANY_TO_MANY invalid cardinality rejected (1 bank, 2 GL)', async () => {
+    setupMockPeriod();
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'u-1', email: 'acct@org.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
+      body: {
+        matchType: 'MANY_TO_MANY',
+        bankTransactionIds: ['btx-1'],
+        glTransactionIds: ['gtx-1', 'gtx-2'],
+      },
+    };
+    const res = createMockRes();
+
+    await createMatchHandler(req as any, res as any);
+    expect(res.statusCode).toBe(400);
+    expect(res.jsonData.error).toContain('Invalid match topology: MANY_TO_MANY');
+  });
+
+  it('MANY_TO_MANY invalid cardinality rejected (2 bank, 1 GL)', async () => {
+    setupMockPeriod();
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'u-1', email: 'acct@org.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
+      body: {
+        matchType: 'MANY_TO_MANY',
+        bankTransactionIds: ['btx-1', 'btx-2'],
+        glTransactionIds: ['gtx-1'],
+      },
+    };
+    const res = createMockRes();
+
+    await createMatchHandler(req as any, res as any);
+    expect(res.statusCode).toBe(400);
+    expect(res.jsonData.error).toContain('Invalid match topology: MANY_TO_MANY');
   });
 
   it('MATCHED transaction reused = rejected', async () => {
@@ -763,6 +919,93 @@ describe('Manual Matching Topology & Status Validation', () => {
     expect(res.statusCode).toBe(400);
     expect(res.jsonData.error).toContain('exceeds available amount');
   });
+
+  it('PARTIALLY_MATCHED transaction without explicit allocation = rejected', async () => {
+    setupMockPeriod();
+    vi.spyOn(prisma.bankTransaction, 'findMany').mockResolvedValue([
+      {
+        id: 'btx-1',
+        organizationId: 'org-1',
+        bankAccountId: 'acc-1',
+        status: 'PARTIALLY_MATCHED',
+        signedAmount: new Prisma.Decimal('500.00'),
+      } as any,
+    ]);
+    vi.spyOn(prisma.glTransaction, 'findMany').mockResolvedValue([
+      {
+        id: 'gtx-1',
+        organizationId: 'org-1',
+        bankAccountId: 'acc-1',
+        status: 'UNMATCHED',
+        amount: new Prisma.Decimal('500.00'),
+      } as any,
+    ]);
+
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'u-1', email: 'acct@org.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
+      body: {
+        matchType: 'ONE_TO_ONE',
+        bankTransactionIds: ['btx-1'],
+        glTransactionIds: ['gtx-1'],
+        // bankAllocations missing for PARTIALLY_MATCHED
+      },
+    };
+    const res = createMockRes();
+
+    await createMatchHandler(req as any, res as any);
+    expect(res.statusCode).toBe(400);
+    expect(res.jsonData.error).toContain('requires an explicit allocation amount');
+  });
+
+  it('unequal bank/GL allocation totals = rejected', async () => {
+    setupMockPeriod();
+    vi.spyOn(prisma.bankTransaction, 'findMany').mockResolvedValue([
+      {
+        id: 'btx-1',
+        organizationId: 'org-1',
+        bankAccountId: 'acc-1',
+        status: 'UNMATCHED',
+        signedAmount: new Prisma.Decimal('100.00'),
+      } as any,
+    ]);
+    vi.spyOn(prisma.glTransaction, 'findMany').mockResolvedValue([
+      {
+        id: 'gtx-1',
+        organizationId: 'org-1',
+        bankAccountId: 'acc-1',
+        status: 'UNMATCHED',
+        amount: new Prisma.Decimal('120.00'),
+      } as any,
+    ]);
+    vi.spyOn(prisma, '$transaction').mockImplementation(async (cb: any) => {
+      return cb({
+        bankTransactionMatch: {
+          aggregate: vi.fn().mockResolvedValue({ _sum: { allocatedAmount: new Prisma.Decimal(0) } }),
+        },
+        glTransactionMatch: {
+          aggregate: vi.fn().mockResolvedValue({ _sum: { allocatedAmount: new Prisma.Decimal(0) } }),
+        },
+      });
+    });
+
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'u-1', email: 'acct@org.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
+      body: {
+        matchType: 'ONE_TO_ONE',
+        bankTransactionIds: ['btx-1'],
+        glTransactionIds: ['gtx-1'],
+      },
+    };
+    const res = createMockRes();
+
+    await createMatchHandler(req as any, res as any);
+    expect(res.statusCode).toBe(400);
+    expect(res.jsonData.error).toContain('Group balance mismatch');
+  });
 });
 
 describe('Tenant Isolation Enforcement', () => {
@@ -780,10 +1023,7 @@ describe('Tenant Isolation Enforcement', () => {
     } as any);
 
     // Rule belongs to org-2
-    vi.spyOn(prisma.matchingRule, 'findFirst').mockResolvedValue({
-      id: 'rule-foreign',
-      organizationId: 'org-2',
-    } as any);
+    vi.spyOn(prisma.matchingRule, 'findFirst').mockResolvedValue(null);
 
     const req = {
       organization: { id: 'org-1' },
@@ -801,6 +1041,81 @@ describe('Tenant Isolation Enforcement', () => {
     await createMatchHandler(req as any, res as any);
     expect(res.statusCode).toBe(403);
     expect(res.jsonData.error).toContain('Matching rule belongs to another organization');
+  });
+
+  it('valid organization matchingRuleId = accepted', async () => {
+    vi.spyOn(prisma.reconciliationPeriod, 'findFirst').mockResolvedValue({
+      id: 'p-1',
+      organizationId: 'org-1',
+      bankAccountId: 'acc-1',
+      status: 'PROCESSING',
+      isLocked: false,
+    } as any);
+
+    vi.spyOn(prisma.matchingRule, 'findFirst').mockResolvedValue({
+      id: 'rule-valid',
+      organizationId: 'org-1',
+      isActive: true,
+    } as any);
+    vi.spyOn(prisma.bankTransaction, 'findMany').mockResolvedValue([
+      {
+        id: 'btx-1',
+        organizationId: 'org-1',
+        bankAccountId: 'acc-1',
+        status: 'UNMATCHED',
+        signedAmount: new Prisma.Decimal('100.00'),
+      } as any,
+    ]);
+    vi.spyOn(prisma.glTransaction, 'findMany').mockResolvedValue([
+      {
+        id: 'gtx-1',
+        organizationId: 'org-1',
+        bankAccountId: 'acc-1',
+        status: 'UNMATCHED',
+        amount: new Prisma.Decimal('100.00'),
+      } as any,
+    ]);
+    vi.spyOn(prisma, '$transaction').mockImplementation(async (cb: any) => {
+      return cb({
+        reconciliationMatch: { create: vi.fn().mockResolvedValue({ id: 'm-rule' }) },
+        bankTransactionMatch: {
+          aggregate: vi.fn().mockResolvedValue({ _sum: { allocatedAmount: new Prisma.Decimal(0) } }),
+          create: vi.fn().mockResolvedValue({ id: 'btxm-1' }),
+        },
+        glTransactionMatch: {
+          aggregate: vi.fn().mockResolvedValue({ _sum: { allocatedAmount: new Prisma.Decimal(0) } }),
+          create: vi.fn().mockResolvedValue({ id: 'gtxm-1' }),
+        },
+        bankTransaction: { update: vi.fn().mockResolvedValue({}) },
+        glTransaction: { update: vi.fn().mockResolvedValue({}) },
+        reconciliationPeriod: { update: vi.fn().mockResolvedValue({}) },
+      });
+    });
+    vi.spyOn(prisma.reconciliationMatch, 'findUnique').mockResolvedValue({
+      id: 'm-rule',
+      matchType: 'ONE_TO_ONE',
+      matchingRuleId: 'rule-valid',
+      bankTransactions: [{ bankTransactionId: 'btx-1' }],
+      glTransactions: [{ glTransactionId: 'gtx-1' }],
+    } as any);
+    vi.spyOn(prisma.auditEvent, 'create').mockResolvedValue({} as any);
+
+    const req = {
+      organization: { id: 'org-1' },
+      params: { id: 'p-1' },
+      user: { id: 'u-1', email: 'acct@org.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
+      body: {
+        matchType: 'ONE_TO_ONE',
+        bankTransactionIds: ['btx-1'],
+        glTransactionIds: ['gtx-1'],
+        matchingRuleId: 'rule-valid',
+      },
+    };
+    const res = createMockRes();
+
+    await createMatchHandler(req as any, res as any);
+    expect(res.statusCode).toBe(201);
+    expect(res.jsonData.match.id).toBe('m-rule');
   });
 
   it('foreign assignedUserId = rejected', async () => {

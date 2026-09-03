@@ -275,12 +275,9 @@ export const createMatchHandler = async (req: any, res: any) => {
     // 3. MATCHING RULE ORGANIZATION VERIFICATION
     if (matchingRuleId) {
       const rule = await prisma.matchingRule.findFirst({
-        where: { id: matchingRuleId },
+        where: { id: matchingRuleId, organizationId: orgId },
       });
       if (!rule) {
-        return res.status(404).json({ error: 'Matching rule not found' });
-      }
-      if (rule.organizationId !== orgId) {
         return res.status(403).json({
           error: 'Tenant isolation violation: Matching rule belongs to another organization',
         });
@@ -319,6 +316,18 @@ export const createMatchHandler = async (req: any, res: any) => {
             error: `Bank transaction ${bTx.id} cannot be matched because it is EXCLUDED`,
           });
         }
+        if (bTx.status !== 'UNMATCHED' && bTx.status !== 'PARTIALLY_MATCHED') {
+          return res.status(400).json({
+            error: `Bank transaction ${bTx.id} cannot be matched because its status is ${bTx.status}`,
+          });
+        }
+        if (bTx.status === 'PARTIALLY_MATCHED') {
+          if (!bankAllocations || bankAllocations[bTx.id] === undefined || bankAllocations[bTx.id] === null) {
+            return res.status(400).json({
+              error: `Bank transaction ${bTx.id} is PARTIALLY_MATCHED and requires an explicit allocation amount in bankAllocations`,
+            });
+          }
+        }
       }
     }
 
@@ -353,11 +362,111 @@ export const createMatchHandler = async (req: any, res: any) => {
             error: `GL transaction ${gTx.id} cannot be matched because it is EXCLUDED`,
           });
         }
+        if (gTx.status !== 'UNMATCHED' && gTx.status !== 'PARTIALLY_MATCHED') {
+          return res.status(400).json({
+            error: `GL transaction ${gTx.id} cannot be matched because its status is ${gTx.status}`,
+          });
+        }
+        if (gTx.status === 'PARTIALLY_MATCHED') {
+          if (!glAllocations || glAllocations[gTx.id] === undefined || glAllocations[gTx.id] === null) {
+            return res.status(400).json({
+              error: `GL transaction ${gTx.id} is PARTIALLY_MATCHED and requires an explicit allocation amount in glAllocations`,
+            });
+          }
+        }
       }
     }
 
     // 5. Create Match Record with multi-transaction junction entries & allocation integrity
     const match = await prisma.$transaction(async (tx) => {
+      // A. Pre-calculate bank allocations and validate availability before any writes
+      const preparedBankMatches: Array<{
+        bTx: any;
+        allocation: Prisma.Decimal;
+        priorAllocated: Prisma.Decimal;
+        absSigned: Prisma.Decimal;
+      }> = [];
+      let totalBankAllocated = new Prisma.Decimal(0);
+
+      for (const bTx of bankTxs) {
+        const bId = bTx.id;
+        const existingAllocations = await tx.bankTransactionMatch.aggregate({
+          where: { bankTransactionId: bId },
+          _sum: { allocatedAmount: true },
+        });
+        const priorAllocated = existingAllocations._sum.allocatedAmount || new Prisma.Decimal(0);
+        const signedDecimal = new Prisma.Decimal(bTx.signedAmount);
+        const absSigned = signedDecimal.isNegative() ? signedDecimal.negated() : signedDecimal;
+        const remainingAmount = absSigned.minus(priorAllocated);
+
+        let allocation: Prisma.Decimal;
+        if (bankAllocations && bankAllocations[bId] !== undefined && bankAllocations[bId] !== null) {
+          allocation = new Prisma.Decimal(bankAllocations[bId]);
+        } else {
+          allocation = remainingAmount;
+        }
+
+        if (allocation.lte(0)) {
+          throw new Error(`Allocation amount must be greater than zero for bank transaction ${bId}`);
+        }
+        if (allocation.gt(remainingAmount)) {
+          throw new Error(
+            `Allocated amount (${allocation.toString()}) exceeds available amount (${remainingAmount.toString()}) for bank transaction ${bId}`
+          );
+        }
+
+        totalBankAllocated = totalBankAllocated.plus(allocation);
+        preparedBankMatches.push({ bTx, allocation, priorAllocated, absSigned });
+      }
+
+      // B. Pre-calculate GL allocations and validate availability before any writes
+      const preparedGlMatches: Array<{
+        gTx: any;
+        allocation: Prisma.Decimal;
+        priorAllocated: Prisma.Decimal;
+        absAmount: Prisma.Decimal;
+      }> = [];
+      let totalGlAllocated = new Prisma.Decimal(0);
+
+      for (const gTx of glTxs) {
+        const gId = gTx.id;
+        const existingAllocations = await tx.glTransactionMatch.aggregate({
+          where: { glTransactionId: gId },
+          _sum: { allocatedAmount: true },
+        });
+        const priorAllocated = existingAllocations._sum.allocatedAmount || new Prisma.Decimal(0);
+        const amountDecimal = new Prisma.Decimal(gTx.amount);
+        const absAmount = amountDecimal.isNegative() ? amountDecimal.negated() : amountDecimal;
+        const remainingAmount = absAmount.minus(priorAllocated);
+
+        let allocation: Prisma.Decimal;
+        if (glAllocations && glAllocations[gId] !== undefined && glAllocations[gId] !== null) {
+          allocation = new Prisma.Decimal(glAllocations[gId]);
+        } else {
+          allocation = remainingAmount;
+        }
+
+        if (allocation.lte(0)) {
+          throw new Error(`Allocation amount must be greater than zero for GL transaction ${gId}`);
+        }
+        if (allocation.gt(remainingAmount)) {
+          throw new Error(
+            `Allocated amount (${allocation.toString()}) exceeds available amount (${remainingAmount.toString()}) for GL transaction ${gId}`
+          );
+        }
+
+        totalGlAllocated = totalGlAllocated.plus(allocation);
+        preparedGlMatches.push({ gTx, allocation, priorAllocated, absAmount });
+      }
+
+      // C. Group Balance Integrity Check: total bank allocated === total GL allocated
+      if (matchType !== 'ADJUSTMENT' && !totalBankAllocated.equals(totalGlAllocated)) {
+        throw new Error(
+          `Group balance mismatch: total bank allocated (${totalBankAllocated.toString()}) does not equal total GL allocated (${totalGlAllocated.toString()})`
+        );
+      }
+
+      // D. Mutations executed ONLY AFTER all validations and allocations pass
       const createdMatch = await tx.reconciliationMatch.create({
         data: {
           reconciliationPeriodId: periodId,
@@ -373,40 +482,11 @@ export const createMatchHandler = async (req: any, res: any) => {
         },
       });
 
-      let totalBankAllocated = new Prisma.Decimal(0);
-      let totalGlAllocated = new Prisma.Decimal(0);
-
-      // Link Bank Transactions with allocation integrity
-      for (const bTx of bankTxs) {
-        const bId = bTx.id;
-        const existingAllocations = await tx.bankTransactionMatch.aggregate({
-          where: { bankTransactionId: bId },
-          _sum: { allocatedAmount: true },
-        });
-        const priorAllocated = existingAllocations._sum.allocatedAmount || new Prisma.Decimal(0);
-        const absSigned = bTx.signedAmount.isNegative() ? bTx.signedAmount.negated() : bTx.signedAmount;
-        const availableAmount = absSigned.minus(priorAllocated);
-
-        let allocation = availableAmount;
-        if (bankAllocations && bankAllocations[bId] !== undefined) {
-          allocation = new Prisma.Decimal(bankAllocations[bId]);
-        }
-
-        if (allocation.lte(0)) {
-          throw new Error(`Allocation amount must be greater than zero for bank transaction ${bId}`);
-        }
-        if (allocation.gt(availableAmount)) {
-          throw new Error(
-            `Allocated amount (${allocation.toString()}) exceeds available amount (${availableAmount.toString()}) for bank transaction ${bId}`
-          );
-        }
-
-        totalBankAllocated = totalBankAllocated.plus(allocation);
-
+      for (const { bTx, allocation, priorAllocated, absSigned } of preparedBankMatches) {
         await tx.bankTransactionMatch.create({
           data: {
             matchId: createdMatch.id,
-            bankTransactionId: bId,
+            bankTransactionId: bTx.id,
             allocatedAmount: allocation,
           },
         });
@@ -414,42 +494,16 @@ export const createMatchHandler = async (req: any, res: any) => {
         const totalAllocated = priorAllocated.plus(allocation);
         const newStatus = totalAllocated.gte(absSigned) ? 'MATCHED' : 'PARTIALLY_MATCHED';
         await tx.bankTransaction.update({
-          where: { id: bId },
+          where: { id: bTx.id },
           data: { status: newStatus },
         });
       }
 
-      // Link GL Transactions with allocation integrity
-      for (const gTx of glTxs) {
-        const gId = gTx.id;
-        const existingAllocations = await tx.glTransactionMatch.aggregate({
-          where: { glTransactionId: gId },
-          _sum: { allocatedAmount: true },
-        });
-        const priorAllocated = existingAllocations._sum.allocatedAmount || new Prisma.Decimal(0);
-        const absAmount = gTx.amount.isNegative() ? gTx.amount.negated() : gTx.amount;
-        const availableAmount = absAmount.minus(priorAllocated);
-
-        let allocation = availableAmount;
-        if (glAllocations && glAllocations[gId] !== undefined) {
-          allocation = new Prisma.Decimal(glAllocations[gId]);
-        }
-
-        if (allocation.lte(0)) {
-          throw new Error(`Allocation amount must be greater than zero for GL transaction ${gId}`);
-        }
-        if (allocation.gt(availableAmount)) {
-          throw new Error(
-            `Allocated amount (${allocation.toString()}) exceeds available amount (${availableAmount.toString()}) for GL transaction ${gId}`
-          );
-        }
-
-        totalGlAllocated = totalGlAllocated.plus(allocation);
-
+      for (const { gTx, allocation, priorAllocated, absAmount } of preparedGlMatches) {
         await tx.glTransactionMatch.create({
           data: {
             matchId: createdMatch.id,
-            glTransactionId: gId,
+            glTransactionId: gTx.id,
             allocatedAmount: allocation,
           },
         });
@@ -457,19 +511,11 @@ export const createMatchHandler = async (req: any, res: any) => {
         const totalAllocated = priorAllocated.plus(allocation);
         const newStatus = totalAllocated.gte(absAmount) ? 'MATCHED' : 'PARTIALLY_MATCHED';
         await tx.glTransaction.update({
-          where: { id: gId },
+          where: { id: gTx.id },
           data: { status: newStatus },
         });
       }
 
-      // Group Balance Integrity: total bank allocated amount = total GL allocated amount
-      if (matchType !== 'ADJUSTMENT' && !totalBankAllocated.equals(totalGlAllocated)) {
-        throw new Error(
-          `Group balance mismatch: total bank allocated (${totalBankAllocated.toString()}) does not equal total GL allocated (${totalGlAllocated.toString()})`
-        );
-      }
-
-      // Update Period status to PROCESSING / RECONCILED if it was NOT_STARTED
       if (period.status === 'NOT_STARTED') {
         await tx.reconciliationPeriod.update({
           where: { id: periodId },
@@ -700,6 +746,11 @@ export const submitApprovalHandler = async (req: any, res: any) => {
       nextStatus = 'PROCESSING';
       isLocked = false;
     } else if (validated.action === 'REJECT') {
+      if (period.isLocked || period.status === 'CLOSED') {
+        return res.status(400).json({
+          error: 'Invalid state transition: A closed or locked reconciliation period cannot be rejected.',
+        });
+      }
       if (period.status !== 'PREPARED' && period.status !== 'REVIEWED') {
         return res.status(400).json({
           error: `Invalid state transition: Cannot reject period from status ${period.status}. Rejection is only permitted for periods in PREPARED or REVIEWED status.`,
