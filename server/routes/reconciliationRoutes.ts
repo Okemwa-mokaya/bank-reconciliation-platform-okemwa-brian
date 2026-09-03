@@ -629,10 +629,7 @@ export const unmatchHandler = async (req: any, res: any) => {
       await tx.bankTransactionMatch.deleteMany({ where: { matchId } });
       await tx.glTransactionMatch.deleteMany({ where: { matchId } });
 
-      // 2. Delete match record
-      await tx.reconciliationMatch.delete({ where: { id: matchId } });
-
-      // 3. Recalculate status for affected bank transactions based on remaining allocations
+      // 2. Recalculate status for affected bank transactions based on remaining allocations
       const affectedBankTxIds = Array.from(new Set(match.bankTransactions.map((b) => b.bankTransactionId)));
       for (const bId of affectedBankTxIds) {
         const bTx = await tx.bankTransaction.findUnique({
@@ -663,7 +660,7 @@ export const unmatchHandler = async (req: any, res: any) => {
         });
       }
 
-      // 4. Recalculate status for affected GL transactions based on remaining allocations
+      // 3. Recalculate status for affected GL transactions based on remaining allocations
       const affectedGlTxIds = Array.from(new Set(match.glTransactions.map((g) => g.glTransactionId)));
       for (const gId of affectedGlTxIds) {
         const gTx = await tx.glTransaction.findUnique({
@@ -693,6 +690,9 @@ export const unmatchHandler = async (req: any, res: any) => {
           data: { status: newStatus },
         });
       }
+
+      // 4. Delete match record
+      await tx.reconciliationMatch.delete({ where: { id: matchId } });
     });
 
     await recordAuditEvent({
