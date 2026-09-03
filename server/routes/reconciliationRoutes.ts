@@ -197,7 +197,7 @@ reconciliationRouter.get('/:id/matches', requirePermission('view_transactions'),
 reconciliationRouter.get('/periods/:id/matches', requirePermission('view_transactions'), getPeriodMatchesHandler);
 
 // Create Match Structure (Strict Cross-Tenant & Locked-Period Security)
-const createMatchHandler = async (req: any, res: any) => {
+export const createMatchHandler = async (req: any, res: any) => {
   try {
     const orgId = req.organization!.id;
     const { id: periodId } = req.params;
@@ -210,6 +210,8 @@ const createMatchHandler = async (req: any, res: any) => {
       explanation = 'Manual match group created by user',
       bankTransactionIds = [],
       glTransactionIds = [],
+      bankAllocations = null,
+      glAllocations = null,
     } = req.body;
 
     const period = await prisma.reconciliationPeriod.findFirst({
@@ -229,9 +231,47 @@ const createMatchHandler = async (req: any, res: any) => {
       return res.status(400).json({ error: 'Match must contain at least one bank or GL transaction' });
     }
 
-    // 2. CROSS-TENANT & ACCOUNT OWNERSHIP VALIDATION
+    // 2. MATCH TOPOLOGY VALIDATION
+    if (matchType === 'ONE_TO_ONE') {
+      if (bankTransactionIds.length !== 1 || glTransactionIds.length !== 1) {
+        return res.status(400).json({
+          error: 'Invalid match topology: ONE_TO_ONE match requires exactly 1 bank transaction and 1 GL transaction',
+        });
+      }
+    } else if (matchType === 'ONE_TO_MANY') {
+      if (bankTransactionIds.length !== 1 || glTransactionIds.length < 2) {
+        return res.status(400).json({
+          error: 'Invalid match topology: ONE_TO_MANY match requires exactly 1 bank transaction and 2 or more GL transactions',
+        });
+      }
+    } else if (matchType === 'MANY_TO_ONE') {
+      if (bankTransactionIds.length < 2 || glTransactionIds.length !== 1) {
+        return res.status(400).json({
+          error: 'Invalid match topology: MANY_TO_ONE match requires 2 or more bank transactions and exactly 1 GL transaction',
+        });
+      }
+    } else if (matchType === 'MANY_TO_MANY') {
+      if (bankTransactionIds.length < 2 || glTransactionIds.length < 2) {
+        return res.status(400).json({
+          error: 'Invalid match topology: MANY_TO_MANY match requires 2 or more bank transactions and 2 or more GL transactions',
+        });
+      }
+    }
+
+    // 3. MATCHING RULE ORGANIZATION VERIFICATION
+    if (matchingRuleId) {
+      const rule = await prisma.matchingRule.findFirst({
+        where: { id: matchingRuleId, organizationId: orgId },
+      });
+      if (!rule) {
+        return res.status(404).json({ error: 'Matching rule not found in organization' });
+      }
+    }
+
+    // 4. CROSS-TENANT, ACCOUNT OWNERSHIP & STATUS VALIDATION
+    let bankTxs: any[] = [];
     if (bankTransactionIds.length > 0) {
-      const bankTxs = await prisma.bankTransaction.findMany({
+      bankTxs = await prisma.bankTransaction.findMany({
         where: { id: { in: bankTransactionIds } },
       });
 
@@ -250,11 +290,22 @@ const createMatchHandler = async (req: any, res: any) => {
             error: 'Bank transaction does not belong to the period bank account',
           });
         }
+        if (bTx.status === 'MATCHED') {
+          return res.status(400).json({
+            error: `Bank transaction ${bTx.id} cannot be matched because it is already MATCHED`,
+          });
+        }
+        if (bTx.status === 'EXCLUDED') {
+          return res.status(400).json({
+            error: `Bank transaction ${bTx.id} cannot be matched because it is EXCLUDED`,
+          });
+        }
       }
     }
 
+    let glTxs: any[] = [];
     if (glTransactionIds.length > 0) {
-      const glTxs = await prisma.glTransaction.findMany({
+      glTxs = await prisma.glTransaction.findMany({
         where: { id: { in: glTransactionIds } },
       });
 
@@ -273,10 +324,20 @@ const createMatchHandler = async (req: any, res: any) => {
             error: 'GL transaction is assigned to a different bank account',
           });
         }
+        if (gTx.status === 'MATCHED') {
+          return res.status(400).json({
+            error: `GL transaction ${gTx.id} cannot be matched because it is already MATCHED`,
+          });
+        }
+        if (gTx.status === 'EXCLUDED') {
+          return res.status(400).json({
+            error: `GL transaction ${gTx.id} cannot be matched because it is EXCLUDED`,
+          });
+        }
       }
     }
 
-    // 3. Create Match Record with multi-transaction junction entries
+    // 5. Create Match Record with multi-transaction junction entries & allocation integrity
     const match = await prisma.$transaction(async (tx) => {
       const createdMatch = await tx.reconciliationMatch.create({
         data: {
@@ -293,42 +354,86 @@ const createMatchHandler = async (req: any, res: any) => {
         },
       });
 
-      // Link Bank Transactions
-      for (const bId of bankTransactionIds) {
-        const bTx = await tx.bankTransaction.findUnique({ where: { id: bId } });
-        if (bTx) {
-          const absSigned = bTx.signedAmount.isNegative() ? bTx.signedAmount.negated() : bTx.signedAmount;
-          await tx.bankTransactionMatch.create({
-            data: {
-              matchId: createdMatch.id,
-              bankTransactionId: bId,
-              allocatedAmount: absSigned,
-            },
-          });
-          await tx.bankTransaction.update({
-            where: { id: bId },
-            data: { status: 'MATCHED' },
-          });
+      // Link Bank Transactions with allocation integrity
+      for (const bTx of bankTxs) {
+        const bId = bTx.id;
+        const existingAllocations = await tx.bankTransactionMatch.aggregate({
+          where: { bankTransactionId: bId },
+          _sum: { allocatedAmount: true },
+        });
+        const priorAllocated = existingAllocations._sum.allocatedAmount || new Prisma.Decimal(0);
+        const absSigned = bTx.signedAmount.isNegative() ? bTx.signedAmount.negated() : bTx.signedAmount;
+        const availableAmount = absSigned.minus(priorAllocated);
+
+        let allocation = availableAmount;
+        if (bankAllocations && bankAllocations[bId] !== undefined) {
+          allocation = new Prisma.Decimal(bankAllocations[bId]);
         }
+
+        if (allocation.lte(0)) {
+          throw new Error(`Allocation amount must be greater than zero for bank transaction ${bId}`);
+        }
+        if (allocation.gt(availableAmount)) {
+          throw new Error(
+            `Allocated amount (${allocation.toString()}) exceeds available amount (${availableAmount.toString()}) for bank transaction ${bId}`
+          );
+        }
+
+        await tx.bankTransactionMatch.create({
+          data: {
+            matchId: createdMatch.id,
+            bankTransactionId: bId,
+            allocatedAmount: allocation,
+          },
+        });
+
+        const totalAllocated = priorAllocated.plus(allocation);
+        const newStatus = totalAllocated.gte(absSigned) ? 'MATCHED' : 'PARTIALLY_MATCHED';
+        await tx.bankTransaction.update({
+          where: { id: bId },
+          data: { status: newStatus },
+        });
       }
 
-      // Link GL Transactions
-      for (const gId of glTransactionIds) {
-        const gTx = await tx.glTransaction.findUnique({ where: { id: gId } });
-        if (gTx) {
-          const absAmount = gTx.amount.isNegative() ? gTx.amount.negated() : gTx.amount;
-          await tx.glTransactionMatch.create({
-            data: {
-              matchId: createdMatch.id,
-              glTransactionId: gId,
-              allocatedAmount: absAmount,
-            },
-          });
-          await tx.glTransaction.update({
-            where: { id: gId },
-            data: { status: 'MATCHED' },
-          });
+      // Link GL Transactions with allocation integrity
+      for (const gTx of glTxs) {
+        const gId = gTx.id;
+        const existingAllocations = await tx.glTransactionMatch.aggregate({
+          where: { glTransactionId: gId },
+          _sum: { allocatedAmount: true },
+        });
+        const priorAllocated = existingAllocations._sum.allocatedAmount || new Prisma.Decimal(0);
+        const absAmount = gTx.amount.isNegative() ? gTx.amount.negated() : gTx.amount;
+        const availableAmount = absAmount.minus(priorAllocated);
+
+        let allocation = availableAmount;
+        if (glAllocations && glAllocations[gId] !== undefined) {
+          allocation = new Prisma.Decimal(glAllocations[gId]);
         }
+
+        if (allocation.lte(0)) {
+          throw new Error(`Allocation amount must be greater than zero for GL transaction ${gId}`);
+        }
+        if (allocation.gt(availableAmount)) {
+          throw new Error(
+            `Allocated amount (${allocation.toString()}) exceeds available amount (${availableAmount.toString()}) for GL transaction ${gId}`
+          );
+        }
+
+        await tx.glTransactionMatch.create({
+          data: {
+            matchId: createdMatch.id,
+            glTransactionId: gId,
+            allocatedAmount: allocation,
+          },
+        });
+
+        const totalAllocated = priorAllocated.plus(allocation);
+        const newStatus = totalAllocated.gte(absAmount) ? 'MATCHED' : 'PARTIALLY_MATCHED';
+        await tx.glTransaction.update({
+          where: { id: gId },
+          data: { status: newStatus },
+        });
       }
 
       // Update Period status to PROCESSING / RECONCILED if it was NOT_STARTED
@@ -367,7 +472,10 @@ const createMatchHandler = async (req: any, res: any) => {
     });
 
     res.status(201).json({ match: fullMatch });
-  } catch (error) {
+  } catch (error: any) {
+    if (error.message && (error.message.includes('Allocation amount') || error.message.includes('Allocated amount'))) {
+      return res.status(400).json({ error: error.message });
+    }
     console.error('Error creating match:', error);
     res.status(500).json({ error: 'Failed to create reconciliation match' });
   }
@@ -473,7 +581,7 @@ reconciliationRouter.post('/:id/propose-auto-matches', requirePermission('reconc
 reconciliationRouter.post('/periods/:id/propose-auto-matches', requirePermission('reconcile'), proposeAutoMatchesHandler);
 
 // Submit Stage Approval Workflow (PREPARED -> REVIEWED -> APPROVED -> CLOSED)
-const submitApprovalHandler = async (req: any, res: any) => {
+export const submitApprovalHandler = async (req: any, res: any) => {
   try {
     const orgId = req.organization!.id;
     const { id: periodId } = req.params;
@@ -487,11 +595,48 @@ const submitApprovalHandler = async (req: any, res: any) => {
       return res.status(404).json({ error: 'Reconciliation period not found' });
     }
 
+    // 1. LOCKED / CLOSED PERIOD SECURITY GUARD
+    // A closed reconciliation period must never be able to transition backwards or accept actions unless reopened by an admin
+    if (period.isLocked || period.status === 'CLOSED') {
+      if (validated.action !== 'REOPEN') {
+        return res.status(400).json({
+          error: 'A closed or locked reconciliation period cannot be modified or rejected. It must first be reopened by an administrator.',
+        });
+      }
+    }
+
+    // 2. STAGE & ACTION ALIGNMENT VALIDATION
+    if (validated.action === 'SUBMIT_PREPARATION' && validated.stage !== 'PREPARED') {
+      return res.status(400).json({
+        error: `Inconsistent workflow: Action 'SUBMIT_PREPARATION' requires stage 'PREPARED', received '${validated.stage}'`,
+      });
+    }
+    if (validated.action === 'SUBMIT_REVIEW' && validated.stage !== 'REVIEWED') {
+      return res.status(400).json({
+        error: `Inconsistent workflow: Action 'SUBMIT_REVIEW' requires stage 'REVIEWED', received '${validated.stage}'`,
+      });
+    }
+    if (validated.action === 'APPROVE' && validated.stage !== 'APPROVED') {
+      return res.status(400).json({
+        error: `Inconsistent workflow: Action 'APPROVE' requires stage 'APPROVED', received '${validated.stage}'`,
+      });
+    }
+    if (validated.action === 'CLOSE' && validated.stage !== 'CLOSED') {
+      return res.status(400).json({
+        error: `Inconsistent workflow: Action 'CLOSE' requires stage 'CLOSED', received '${validated.stage}'`,
+      });
+    }
+    if (validated.action === 'REJECT' && !['REVIEWED', 'APPROVED'].includes(validated.stage)) {
+      return res.status(400).json({
+        error: `Inconsistent workflow: Action 'REJECT' is only permitted during 'REVIEWED' or 'APPROVED' stages, received '${validated.stage}'`,
+      });
+    }
+
     let nextStatus = period.status;
     let isLocked = period.isLocked;
     const updateData: Record<string, unknown> = {};
 
-    // STRICT WORKFLOW STATE MACHINE VALIDATION
+    // 3. STRICT WORKFLOW STATE MACHINE VALIDATION
     if (validated.action === 'SUBMIT_PREPARATION') {
       const allowedPrior = ['NOT_STARTED', 'PROCESSING', 'RECONCILED', 'EXCEPTIONS'];
       if (!allowedPrior.includes(period.status)) {
@@ -530,7 +675,7 @@ const submitApprovalHandler = async (req: any, res: any) => {
       isLocked = true;
       updateData.closedAt = new Date();
     } else if (validated.action === 'REOPEN') {
-      if (!req.user?.permissions.includes('manage_users') && !req.user?.roles.includes('ADMIN')) {
+      if (!req.user?.permissions?.includes('manage_users') && !req.user?.roles?.includes('ADMIN')) {
         return res.status(403).json({
           error: 'Forbidden: Only administrators with manage_users permission can reopen locked or approved periods.',
         });
@@ -543,6 +688,11 @@ const submitApprovalHandler = async (req: any, res: any) => {
       nextStatus = 'PROCESSING';
       isLocked = false;
     } else if (validated.action === 'REJECT') {
+      if (period.status !== 'PREPARED' && period.status !== 'REVIEWED') {
+        return res.status(400).json({
+          error: `Invalid state transition: Cannot reject period from status ${period.status}. Rejection is only permitted for periods in PREPARED or REVIEWED status.`,
+        });
+      }
       nextStatus = 'EXCEPTIONS';
       isLocked = false;
     } else {

@@ -4,6 +4,7 @@ import { requirePermission } from '../middleware/rbac';
 import { recordAuditEvent } from '../services/auditService';
 import { Prisma } from '@prisma/client';
 import crypto from 'crypto';
+import { CreateBankTransactionSchema, CreateGlTransactionSchema } from '../validators/schemas';
 
 export const transactionRouter = Router();
 
@@ -87,70 +88,82 @@ transactionRouter.get('/gl', requirePermission('view_transactions'), async (req,
 });
 
 // Create Bank Transaction entry (Preserves raw source record intact with Decimal precision)
-transactionRouter.post('/bank', requirePermission('upload_statement'), async (req, res) => {
+export const createBankTransactionHandler = async (req: any, res: any) => {
   try {
     const orgId = req.organization!.id;
-    const {
-      bankAccountId,
-      statementId,
-      transactionDate,
-      valueDate,
-      description,
-      narration,
-      referenceNumber,
-      chequeNumber,
-      accountNumber,
-      transactionType = 'DEBIT',
-      currency = 'USD',
-      debit = 0,
-      credit = 0,
-      signedAmount,
-      balance,
-      rawSourceData = {},
-    } = req.body;
-
-    if (!bankAccountId || !transactionDate || !description) {
-      return res.status(400).json({ error: 'Missing required bank transaction fields' });
-    }
+    const validated = CreateBankTransactionSchema.parse(req.body);
 
     // Verify bank account ownership
     const account = await prisma.bankAccount.findFirst({
-      where: { id: bankAccountId, organizationId: orgId },
+      where: { id: validated.bankAccountId, organizationId: orgId },
     });
     if (!account) {
-      return res.status(404).json({ error: 'Bank account not found' });
+      return res.status(404).json({ error: 'Bank account not found in organization' });
     }
 
-    const debitDecimal = new Prisma.Decimal(debit);
-    const creditDecimal = new Prisma.Decimal(credit);
-    const calcSignedDecimal = signedAmount !== undefined
-      ? new Prisma.Decimal(signedAmount)
+    if (validated.statementId) {
+      const stmt = await prisma.bankStatement.findFirst({
+        where: { id: validated.statementId, organizationId: orgId },
+      });
+      if (!stmt) {
+        return res.status(404).json({ error: 'Linked bank statement not found in organization' });
+      }
+    }
+
+    const debitDecimal = new Prisma.Decimal(validated.debit);
+    const creditDecimal = new Prisma.Decimal(validated.credit);
+    const calcSignedDecimal = validated.signedAmount !== undefined
+      ? new Prisma.Decimal(validated.signedAmount)
       : creditDecimal.minus(debitDecimal);
 
     // Compute cryptographic fingerprint for deduplication
-    const fingerprintStr = `${orgId}-${bankAccountId}-${transactionDate}-${referenceNumber || ''}-${chequeNumber || ''}-${calcSignedDecimal.toString()}-${description}`;
+    const fingerprintStr = `${orgId}-${validated.bankAccountId}-${validated.transactionDate}-${validated.referenceNumber || ''}-${validated.chequeNumber || ''}-${calcSignedDecimal.toString()}-${validated.description}`;
     const transactionFingerprint = crypto.createHash('sha256').update(fingerprintStr).digest('hex');
+
+    // Tenant-scoped duplicate detection & prevention
+    const existingDuplicate = await prisma.bankTransaction.findFirst({
+      where: { organizationId: orgId, transactionFingerprint },
+    });
+
+    if (validated.preventDuplicates || req.query.preventDuplicates === 'true') {
+      if (existingDuplicate) {
+        return res.status(409).json({
+          error: 'Duplicate bank transaction detected within organization',
+          isDuplicate: true,
+          duplicateOfId: existingDuplicate.id,
+          transactionFingerprint,
+        });
+      }
+    }
 
     const transaction = await prisma.bankTransaction.create({
       data: {
         organizationId: orgId,
-        bankAccountId,
-        statementId: statementId || null,
-        transactionDate: new Date(transactionDate),
-        valueDate: valueDate ? new Date(valueDate) : null,
-        description,
-        narration: narration || null,
-        referenceNumber: referenceNumber || null,
-        chequeNumber: chequeNumber || null,
-        accountNumber: accountNumber || null,
-        transactionType,
-        currency,
+        bankAccountId: validated.bankAccountId,
+        statementId: validated.statementId || null,
+        transactionDate: new Date(validated.transactionDate),
+        valueDate: validated.valueDate ? new Date(validated.valueDate) : null,
+        description: validated.description,
+        narration: validated.narration || null,
+        referenceNumber: validated.referenceNumber || null,
+        chequeNumber: validated.chequeNumber || null,
+        accountNumber: validated.accountNumber || null,
+        transactionType: validated.transactionType,
+        currency: validated.currency,
         debit: debitDecimal,
         credit: creditDecimal,
         signedAmount: calcSignedDecimal,
-        balance: balance !== undefined ? new Prisma.Decimal(balance) : null,
-        originalImportedData: JSON.stringify(rawSourceData || { description, debit, credit, transactionDate }),
-        normalizedData: JSON.stringify({ description: description.trim().toUpperCase(), referenceNumber }),
+        balance: validated.balance !== undefined && validated.balance !== null ? new Prisma.Decimal(validated.balance) : null,
+        originalImportedData: JSON.stringify(validated.rawSourceData || {
+          description: validated.description,
+          debit: validated.debit,
+          credit: validated.credit,
+          transactionDate: validated.transactionDate,
+        }),
+        normalizedData: JSON.stringify({
+          description: validated.description.trim().toUpperCase(),
+          referenceNumber: validated.referenceNumber,
+        }),
         transactionFingerprint,
         status: 'UNMATCHED',
       },
@@ -164,82 +177,95 @@ transactionRouter.post('/bank', requirePermission('upload_statement'), async (re
       action: 'BANK_TRANSACTION_CREATED',
       entityType: 'BankTransaction',
       entityId: transaction.id,
-      newValue: { id: transaction.id, description, amount: calcSignedDecimal.toString() },
+      newValue: { id: transaction.id, description: validated.description, amount: calcSignedDecimal.toString() },
       reason: 'Bank transaction record created',
     });
 
-    res.status(201).json({ transaction });
-  } catch (error) {
+    res.status(201).json({
+      transaction,
+      isDuplicate: !!existingDuplicate,
+      duplicateOfId: existingDuplicate ? existingDuplicate.id : null,
+      transactionFingerprint,
+    });
+  } catch (error: any) {
+    if (error.name === 'ZodError') {
+      return res.status(400).json({ error: 'Validation error', details: error.errors });
+    }
     console.error('Error creating bank transaction:', error);
     res.status(500).json({ error: 'Failed to create bank transaction' });
   }
-});
+};
+
+transactionRouter.post('/bank', requirePermission('upload_statement'), createBankTransactionHandler);
 
 // Create GL Transaction entry
-transactionRouter.post('/gl', requirePermission('upload_gl'), async (req, res) => {
+export const createGlTransactionHandler = async (req: any, res: any) => {
   try {
     const orgId = req.organization!.id;
-    const {
-      bankAccountId,
-      transactionDate,
-      valueDate,
-      referenceNumber,
-      chequeNumber,
-      accountNumber,
-      transactionType = 'JOURNAL',
-      currency = 'USD',
-      debit = 0,
-      credit = 0,
-      amount,
-      narration,
-      customerSupplier,
-      journalNumber,
-      sourceSystem = 'GENERAL_LEDGER',
-      rawSourceData = {},
-    } = req.body;
+    const validated = CreateGlTransactionSchema.parse(req.body);
 
-    if (!transactionDate || !narration) {
-      return res.status(400).json({ error: 'Missing required GL transaction fields' });
-    }
-
-    if (bankAccountId) {
+    if (validated.bankAccountId) {
       const account = await prisma.bankAccount.findFirst({
-        where: { id: bankAccountId, organizationId: orgId },
+        where: { id: validated.bankAccountId, organizationId: orgId },
       });
       if (!account) {
-        return res.status(404).json({ error: 'Linked bank account not found' });
+        return res.status(404).json({ error: 'Linked bank account not found in organization' });
       }
     }
 
-    const debitDecimal = new Prisma.Decimal(debit);
-    const creditDecimal = new Prisma.Decimal(credit);
-    const calcAmountDecimal = amount !== undefined
-      ? new Prisma.Decimal(amount)
+    const debitDecimal = new Prisma.Decimal(validated.debit);
+    const creditDecimal = new Prisma.Decimal(validated.credit);
+    const calcAmountDecimal = validated.amount !== undefined
+      ? new Prisma.Decimal(validated.amount)
       : debitDecimal.minus(creditDecimal);
 
-    const fingerprintStr = `${orgId}-${bankAccountId || 'global'}-${transactionDate}-${journalNumber || ''}-${referenceNumber || ''}-${calcAmountDecimal.toString()}-${narration}`;
+    const fingerprintStr = `${orgId}-${validated.bankAccountId || 'global'}-${validated.transactionDate}-${validated.journalNumber || ''}-${validated.referenceNumber || ''}-${calcAmountDecimal.toString()}-${validated.narration}`;
     const transactionFingerprint = crypto.createHash('sha256').update(fingerprintStr).digest('hex');
+
+    // Tenant-scoped duplicate detection & prevention
+    const existingDuplicate = await prisma.glTransaction.findFirst({
+      where: { organizationId: orgId, transactionFingerprint },
+    });
+
+    if (validated.preventDuplicates || req.query.preventDuplicates === 'true') {
+      if (existingDuplicate) {
+        return res.status(409).json({
+          error: 'Duplicate GL transaction detected within organization',
+          isDuplicate: true,
+          duplicateOfId: existingDuplicate.id,
+          transactionFingerprint,
+        });
+      }
+    }
 
     const transaction = await prisma.glTransaction.create({
       data: {
         organizationId: orgId,
-        bankAccountId: bankAccountId || null,
-        transactionDate: new Date(transactionDate),
-        valueDate: valueDate ? new Date(valueDate) : null,
-        referenceNumber: referenceNumber || null,
-        chequeNumber: chequeNumber || null,
-        accountNumber: accountNumber || null,
-        transactionType,
-        currency,
+        bankAccountId: validated.bankAccountId || null,
+        transactionDate: new Date(validated.transactionDate),
+        valueDate: validated.valueDate ? new Date(validated.valueDate) : null,
+        referenceNumber: validated.referenceNumber || null,
+        chequeNumber: validated.chequeNumber || null,
+        accountNumber: validated.accountNumber || null,
+        transactionType: validated.transactionType,
+        currency: validated.currency,
         debit: debitDecimal,
         credit: creditDecimal,
         amount: calcAmountDecimal,
-        narration,
-        customerSupplier: customerSupplier || null,
-        journalNumber: journalNumber || null,
-        sourceSystem,
-        originalData: JSON.stringify(rawSourceData || { narration, debit, credit, transactionDate }),
-        normalizedData: JSON.stringify({ narration: narration.trim().toUpperCase(), referenceNumber }),
+        narration: validated.narration,
+        customerSupplier: validated.customerSupplier || null,
+        journalNumber: validated.journalNumber || null,
+        sourceSystem: validated.sourceSystem,
+        originalData: JSON.stringify(validated.rawSourceData || {
+          narration: validated.narration,
+          debit: validated.debit,
+          credit: validated.credit,
+          transactionDate: validated.transactionDate,
+        }),
+        normalizedData: JSON.stringify({
+          narration: validated.narration.trim().toUpperCase(),
+          referenceNumber: validated.referenceNumber,
+        }),
         transactionFingerprint,
         status: 'UNMATCHED',
       },
@@ -253,13 +279,23 @@ transactionRouter.post('/gl', requirePermission('upload_gl'), async (req, res) =
       action: 'GL_TRANSACTION_CREATED',
       entityType: 'GLTransaction',
       entityId: transaction.id,
-      newValue: { id: transaction.id, narration, amount: calcAmountDecimal.toString() },
+      newValue: { id: transaction.id, narration: validated.narration, amount: calcAmountDecimal.toString() },
       reason: 'General Ledger transaction record registered',
     });
 
-    res.status(201).json({ transaction });
-  } catch (error) {
+    res.status(201).json({
+      transaction,
+      isDuplicate: !!existingDuplicate,
+      duplicateOfId: existingDuplicate ? existingDuplicate.id : null,
+      transactionFingerprint,
+    });
+  } catch (error: any) {
+    if (error.name === 'ZodError') {
+      return res.status(400).json({ error: 'Validation error', details: error.errors });
+    }
     console.error('Error creating GL transaction:', error);
     res.status(500).json({ error: 'Failed to create GL transaction' });
   }
-});
+};
+
+transactionRouter.post('/gl', requirePermission('upload_gl'), createGlTransactionHandler);

@@ -59,7 +59,7 @@ exceptionRouter.get('/', requirePermission('view_dashboard'), async (req, res) =
 });
 
 // Create Exception
-exceptionRouter.post('/', requirePermission('reconcile'), async (req, res) => {
+export const createExceptionHandler = async (req: any, res: any) => {
   try {
     const orgId = req.organization!.id;
     const validated = CreateExceptionSchema.parse(req.body);
@@ -68,7 +68,7 @@ exceptionRouter.post('/', requirePermission('reconcile'), async (req, res) => {
       const period = await prisma.reconciliationPeriod.findFirst({
         where: { id: validated.reconciliationPeriodId, organizationId: orgId },
       });
-      if (!period) {
+      if (!period || period.organizationId !== orgId) {
         return res.status(404).json({ error: 'Linked reconciliation period not found in organization' });
       }
       if (period.isLocked || period.status === 'CLOSED') {
@@ -79,8 +79,14 @@ exceptionRouter.post('/', requirePermission('reconcile'), async (req, res) => {
     if (validated.bankTransactionId) {
       const bankTx = await prisma.bankTransaction.findFirst({
         where: { id: validated.bankTransactionId, organizationId: orgId },
+        include: { bankAccount: { include: { bank: true } } },
       });
-      if (!bankTx) {
+      if (
+        !bankTx ||
+        bankTx.organizationId !== orgId ||
+        bankTx.bankAccount?.organizationId !== orgId ||
+        bankTx.bankAccount?.bank?.organizationId !== orgId
+      ) {
         return res.status(404).json({ error: 'Linked bank transaction not found in organization' });
       }
     }
@@ -89,8 +95,17 @@ exceptionRouter.post('/', requirePermission('reconcile'), async (req, res) => {
       const glTx = await prisma.glTransaction.findFirst({
         where: { id: validated.glTransactionId, organizationId: orgId },
       });
-      if (!glTx) {
+      if (!glTx || glTx.organizationId !== orgId) {
         return res.status(404).json({ error: 'Linked GL transaction not found in organization' });
+      }
+    }
+
+    if (validated.assignedUserId) {
+      const assignedUser = await prisma.user.findFirst({
+        where: { id: validated.assignedUserId, organizationId: orgId },
+      });
+      if (!assignedUser || assignedUser.organizationId !== orgId) {
+        return res.status(404).json({ error: 'Assigned user not found in organization' });
       }
     }
 
@@ -133,7 +148,9 @@ exceptionRouter.post('/', requirePermission('reconcile'), async (req, res) => {
     console.error('Error creating exception:', error);
     res.status(500).json({ error: 'Failed to create exception record' });
   }
-});
+};
+
+exceptionRouter.post('/', requirePermission('reconcile'), createExceptionHandler);
 
 // Resolve Exception
 exceptionRouter.patch('/:id/resolve', requirePermission('resolve_exception'), async (req, res) => {

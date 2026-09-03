@@ -77,7 +77,7 @@ statementRouter.get('/:id', requirePermission('view_dashboard'), async (req, res
 });
 
 // Create statement record (Phase 1 metadata foundation - Honest initial statuses)
-const registerStatementHandler = async (req: any, res: any) => {
+export const registerStatementHandler = async (req: any, res: any) => {
   try {
     const orgId = req.organization!.id;
     const {
@@ -90,7 +90,6 @@ const registerStatementHandler = async (req: any, res: any) => {
       closingBalance = 0,
       totalCredits = 0,
       totalDebits = 0,
-      transactionCount = 0,
       pageCount = 1,
     } = req.body;
 
@@ -107,7 +106,8 @@ const registerStatementHandler = async (req: any, res: any) => {
       return res.status(404).json({ error: 'Bank account not found' });
     }
 
-    // Phase 1 Foundation: Honest initial lifecycle states (NO fabricated completion or fake OCR scores)
+    // Phase 1 Foundation: Honest initial unprocessed/pending lifecycle states
+    // (NO fabricated completion, NO fake OCR, NO fabricated transaction counts, NO fake confidence scores)
     const statement = await prisma.bankStatement.create({
       data: {
         organizationId: orgId,
@@ -126,20 +126,20 @@ const registerStatementHandler = async (req: any, res: any) => {
         closingBalance: new Prisma.Decimal(closingBalance),
         totalCredits: new Prisma.Decimal(totalCredits),
         totalDebits: new Prisma.Decimal(totalDebits),
-        transactionCount: Number(transactionCount),
+        transactionCount: 0,
         processingStartedAt: null,
         processingCompletedAt: null,
       },
     });
 
-    // Create page records for tracking
+    // Create page records for tracking - strictly unprocessed
     const pagesData = [];
     for (let p = 1; p <= Number(pageCount); p++) {
       pagesData.push({
         statementId: statement.id,
         pageNumber: p,
         extractionStatus: 'PENDING',
-        ocrStatus: fileType.toUpperCase() === 'PDF' ? 'PENDING' : 'NOT_REQUIRED',
+        ocrStatus: 'NOT_REQUIRED',
         extractionConfidence: null,
       });
     }

@@ -185,7 +185,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ data, isLoading, o
                 <CheckCircle2 className="w-4 h-4 text-emerald-600" />
                 <span className="text-sm font-medium text-stone-700">Matched Tx</span>
               </div>
-              <span className="font-mono font-bold text-stone-900">{metrics.automaticallyMatchedCount}</span>
+              <span className="font-mono font-bold text-stone-900">
+                {metrics.matchedCount ?? metrics.automaticallyMatchedCount}
+              </span>
             </div>
 
             <div className="flex items-center justify-between">

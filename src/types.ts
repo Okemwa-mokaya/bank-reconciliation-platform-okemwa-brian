@@ -274,6 +274,8 @@ export interface DashboardMetrics {
   totalProcessedTransactions: number;
   bankTransactionsTotal: number;
   glTransactionsTotal: number;
+  matchedCount: number;
+  manuallyMatchedCount?: number;
   automaticallyMatchedCount: number;
   unmatchedCount: number;
   exceptionsCount: number;

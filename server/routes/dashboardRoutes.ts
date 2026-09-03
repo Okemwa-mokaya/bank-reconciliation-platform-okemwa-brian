@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { prisma } from '../db';
 import { requirePermission } from '../middleware/rbac';
+import { Prisma } from '@prisma/client';
 
 export const dashboardRouter = Router();
 
@@ -68,7 +69,7 @@ dashboardRouter.get('/summary', requirePermission('view_dashboard'), async (req,
       }),
     ]);
 
-    // Calculate real outstanding values from DB
+    // Calculate real outstanding values from DB using Prisma.Decimal
     const [bankOutstandingSum, glOutstandingSum] = await Promise.all([
       prisma.bankTransaction.aggregate({
         where: { organizationId: orgId, status: 'UNMATCHED' },
@@ -79,6 +80,12 @@ dashboardRouter.get('/summary', requirePermission('view_dashboard'), async (req,
         _sum: { amount: true },
       }),
     ]);
+
+    const bankSignedSum = bankOutstandingSum._sum.signedAmount || new Prisma.Decimal(0);
+    const glAmountSum = glOutstandingSum._sum.amount || new Prisma.Decimal(0);
+    const bankTotalDecimal = bankSignedSum.isNegative() ? bankSignedSum.negated() : bankSignedSum;
+    const glTotalDecimal = glAmountSum.isNegative() ? glAmountSum.negated() : glAmountSum;
+    const combinedOutstandingDecimal = bankTotalDecimal.plus(glTotalDecimal);
 
     const totalProcessedTransactions = bankTxTotal + glTxTotal;
     const totalMatchedTransactions = bankTxMatched + glTxMatched;
@@ -119,7 +126,9 @@ dashboardRouter.get('/summary', requirePermission('view_dashboard'), async (req,
         totalProcessedTransactions,
         bankTransactionsTotal: bankTxTotal,
         glTransactionsTotal: glTxTotal,
-        automaticallyMatchedCount: totalMatchedTransactions,
+        matchedCount: totalMatchedTransactions,
+        manuallyMatchedCount: totalMatchedTransactions,
+        automaticallyMatchedCount: 0,
         unmatchedCount: totalUnmatchedTransactions,
         exceptionsCount: exceptionsOpen,
         exceptionsTotal,
@@ -127,11 +136,9 @@ dashboardRouter.get('/summary', requirePermission('view_dashboard'), async (req,
         reconciliationPeriodsApproved: periodsApproved,
         activeMatchingRulesCount: activeRulesCount,
         outstandingValue: {
-          bankTotal: Math.abs(Number(bankOutstandingSum._sum.signedAmount || 0)),
-          glTotal: Math.abs(Number(glOutstandingSum._sum.amount || 0)),
-          combined:
-            Math.abs(Number(bankOutstandingSum._sum.signedAmount || 0)) +
-            Math.abs(Number(glOutstandingSum._sum.amount || 0)),
+          bankTotal: Number(bankTotalDecimal.toFixed(2)),
+          glTotal: Number(glTotalDecimal.toFixed(2)),
+          combined: Number(combinedOutstandingDecimal.toFixed(2)),
         },
         oldestOutstandingTransaction: {
           date: oldestOutstandingDate,

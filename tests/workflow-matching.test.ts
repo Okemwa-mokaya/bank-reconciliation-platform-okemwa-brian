@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../server/db';
-import { proposeAutoMatchesHandler } from '../server/routes/reconciliationRoutes';
+import { proposeAutoMatchesHandler, createMatchHandler, submitApprovalHandler } from '../server/routes/reconciliationRoutes';
+import { createExceptionHandler } from '../server/routes/exceptionRoutes';
+import { createBankTransactionHandler } from '../server/routes/transactionRoutes';
 
 describe('Workflow State Machine & Reconciliation Matching Guard Logic', () => {
   it('1. Validates strict stage transition sequences: PREPARED -> REVIEWED -> APPROVED -> CLOSED', () => {
@@ -182,5 +184,180 @@ describe('Workflow State Machine & Reconciliation Matching Guard Logic', () => {
     expect(supportedMatchTopologies).toContain('MANUAL');
     expect(supportedMatchTopologies).toContain('ADJUSTMENT');
     expect(supportedMatchTopologies.length).toBe(6);
+  });
+
+  it('9. Rejects workflow actions on a CLOSED reconciliation period unless explicitly reopened by an admin', async () => {
+    vi.spyOn(prisma.reconciliationPeriod, 'findFirst').mockResolvedValue({
+      id: 'period-closed-1',
+      organizationId: 'org-test-1',
+      bankAccountId: 'acc-1',
+      status: 'CLOSED',
+      isLocked: true,
+      periodStart: new Date('2026-01-01'),
+      periodEnd: new Date('2026-01-31'),
+    } as any);
+
+    const mockReq = {
+      organization: { id: 'org-test-1' },
+      params: { id: 'period-closed-1' },
+      user: { id: 'user-1', email: 'auditor@org.com', roles: ['AUDITOR'], permissions: ['approve_reconciliation'] },
+      body: {
+        stage: 'REVIEWED',
+        action: 'REJECT',
+        comments: 'Attempting to reject already closed period',
+      },
+    };
+
+    const mockRes = {
+      statusCode: 0,
+      jsonData: null as any,
+      status(code: number) {
+        this.statusCode = code;
+        return this;
+      },
+      json(data: any) {
+        this.jsonData = data;
+        return this;
+      },
+    };
+
+    try {
+      await submitApprovalHandler(mockReq as any, mockRes as any);
+      expect(mockRes.statusCode).toBe(400);
+      expect(mockRes.jsonData.error).toContain('closed or locked');
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('10. Enforces matching topology and rejects matching already MATCHED transactions or invalid topology', async () => {
+    vi.spyOn(prisma.reconciliationPeriod, 'findFirst').mockResolvedValue({
+      id: 'period-active-1',
+      organizationId: 'org-test-1',
+      bankAccountId: 'acc-1',
+      status: 'PROCESSING',
+      isLocked: false,
+    } as any);
+
+    const mockReq = {
+      organization: { id: 'org-test-1' },
+      params: { id: 'period-active-1' },
+      user: { id: 'user-1', email: 'accountant@org.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
+      body: {
+        matchType: 'ONE_TO_ONE',
+        bankTransactionIds: ['btx-1', 'btx-2'], // Violates ONE_TO_ONE topology
+        glTransactionIds: ['gtx-1'],
+      },
+    };
+
+    const mockRes = {
+      statusCode: 0,
+      jsonData: null as any,
+      status(code: number) {
+        this.statusCode = code;
+        return this;
+      },
+      json(data: any) {
+        this.jsonData = data;
+        return this;
+      },
+    };
+
+    try {
+      await createMatchHandler(mockReq as any, mockRes as any);
+      expect(mockRes.statusCode).toBe(400);
+      expect(mockRes.jsonData.error).toContain('Invalid match topology');
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('11. Prevents cross-tenant exception links across all referenced entities', async () => {
+    // Return null when searching for period with current orgId (belongs to another tenant)
+    vi.spyOn(prisma.reconciliationPeriod, 'findFirst').mockResolvedValue(null);
+
+    const mockReq = {
+      organization: { id: 'org-tenant-A' },
+      user: { id: 'user-A', email: 'user@tenantA.com', roles: ['ACCOUNTANT'] },
+      body: {
+        category: 'OTHER',
+        priority: 'HIGH',
+        riskLevel: 'MEDIUM',
+        description: 'Discrepancy observed across tenant boundary',
+        relevantDate: '2026-03-01T00:00:00.000Z',
+        reconciliationPeriodId: 'a0000000-0000-4000-8000-000000000002',
+      },
+    };
+
+    const mockRes = {
+      statusCode: 0,
+      jsonData: null as any,
+      status(code: number) {
+        this.statusCode = code;
+        return this;
+      },
+      json(data: any) {
+        this.jsonData = data;
+        return this;
+      },
+    };
+
+    try {
+      await createExceptionHandler(mockReq as any, mockRes as any);
+      expect(mockRes.statusCode).toBe(404);
+      expect(mockRes.jsonData.error).toContain('not found in organization');
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('12. Enforces tenant-scoped duplicate detection and prevention on bank transactions', async () => {
+    vi.spyOn(prisma.bankAccount, 'findFirst').mockResolvedValue({
+      id: 'a0000000-0000-4000-8000-000000000001',
+      organizationId: 'org-test-1',
+    } as any);
+
+    // Existing transaction with identical fingerprint exists
+    vi.spyOn(prisma.bankTransaction, 'findFirst').mockResolvedValue({
+      id: 'btx-existing-1',
+      organizationId: 'org-test-1',
+      transactionFingerprint: 'existing-hash',
+    } as any);
+
+    const mockReq = {
+      organization: { id: 'org-test-1' },
+      user: { id: 'user-1', email: 'uploader@org.com', roles: ['ACCOUNTANT'] },
+      query: { preventDuplicates: 'true' },
+      body: {
+        bankAccountId: 'a0000000-0000-4000-8000-000000000001',
+        transactionDate: '2026-03-01T10:00:00.000Z',
+        description: 'Vendor payment',
+        debit: '500.00',
+        credit: '0.00',
+        preventDuplicates: true,
+      },
+    };
+
+    const mockRes = {
+      statusCode: 0,
+      jsonData: null as any,
+      status(code: number) {
+        this.statusCode = code;
+        return this;
+      },
+      json(data: any) {
+        this.jsonData = data;
+        return this;
+      },
+    };
+
+    try {
+      await createBankTransactionHandler(mockReq as any, mockRes as any);
+      expect(mockRes.statusCode).toBe(409);
+      expect(mockRes.jsonData.error).toContain('Duplicate bank transaction detected');
+      expect(mockRes.jsonData.isDuplicate).toBe(true);
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 });

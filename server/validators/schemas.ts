@@ -102,3 +102,50 @@ export const CreateAgingBucketSchema = z.object({
   maxDays: z.number().int().min(1).optional().nullable(),
   displayOrder: z.number().int().min(1),
 });
+
+export const MonetaryValueSchema = z.union([
+  z.number().refine((n) => !isNaN(n) && isFinite(n), 'Invalid monetary number'),
+  z.string().regex(/^-?\d+(\.\d+)?$/, 'Invalid decimal string format'),
+]);
+
+export const CreateBankTransactionSchema = z.object({
+  bankAccountId: z.string().uuid('Valid bank account ID required'),
+  statementId: z.string().uuid().optional().nullable(),
+  statementPageId: z.string().uuid().optional().nullable(),
+  transactionDate: z.string().refine((val) => !isNaN(Date.parse(val)), 'Valid transaction date required'),
+  valueDate: z.string().refine((val) => !isNaN(Date.parse(val)), 'Valid value date required').optional().nullable(),
+  description: z.string().min(1, 'Description is required'),
+  narration: z.string().optional().nullable(),
+  referenceNumber: z.string().optional().nullable(),
+  chequeNumber: z.string().optional().nullable(),
+  accountNumber: z.string().optional().nullable(),
+  transactionType: z.enum(['DEBIT', 'CREDIT', 'TRANSFER', 'FEE', 'INTEREST', 'REVERSAL']).default('DEBIT'),
+  currency: z.string().length(3, 'Currency must be a 3-letter ISO code').default('USD'),
+  debit: MonetaryValueSchema.default(0),
+  credit: MonetaryValueSchema.default(0),
+  signedAmount: MonetaryValueSchema.optional(),
+  balance: MonetaryValueSchema.optional().nullable(),
+  rawSourceData: z.record(z.string(), z.unknown()).optional(),
+  preventDuplicates: z.boolean().optional().default(false),
+});
+
+export const CreateGlTransactionSchema = z.object({
+  bankAccountId: z.string().uuid().optional().nullable(),
+  transactionDate: z.string().refine((val) => !isNaN(Date.parse(val)), 'Valid transaction date required'),
+  valueDate: z.string().refine((val) => !isNaN(Date.parse(val)), 'Valid value date required').optional().nullable(),
+  referenceNumber: z.string().optional().nullable(),
+  chequeNumber: z.string().optional().nullable(),
+  accountNumber: z.string().optional().nullable(),
+  transactionType: z.enum(['DEBIT', 'CREDIT', 'JOURNAL', 'ADJUSTMENT']).default('JOURNAL'),
+  currency: z.string().length(3, 'Currency must be a 3-letter ISO code').default('USD'),
+  debit: MonetaryValueSchema.default(0),
+  credit: MonetaryValueSchema.default(0),
+  amount: MonetaryValueSchema.optional(),
+  narration: z.string().min(1, 'Narration is required'),
+  customerSupplier: z.string().optional().nullable(),
+  journalNumber: z.string().optional().nullable(),
+  sourceSystem: z.string().default('GENERAL_LEDGER'),
+  rawSourceData: z.record(z.string(), z.unknown()).optional(),
+  preventDuplicates: z.boolean().optional().default(false),
+});
+

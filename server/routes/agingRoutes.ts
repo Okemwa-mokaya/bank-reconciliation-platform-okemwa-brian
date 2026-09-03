@@ -3,6 +3,7 @@ import { prisma } from '../db';
 import { requirePermission } from '../middleware/rbac';
 import { CreateAgingBucketSchema } from '../validators/schemas';
 import { recordAuditEvent } from '../services/auditService';
+import { Prisma } from '@prisma/client';
 
 export const agingRouter = Router();
 
@@ -101,9 +102,9 @@ agingRouter.get('/analysis', requirePermission('view_dashboard'), async (req, re
 
     const bucketResults = buckets.map((bucket) => {
       let bankCount = 0;
-      let bankTotalValue = 0;
+      let bankTotalValue = new Prisma.Decimal(0);
       let glCount = 0;
-      let glTotalValue = 0;
+      let glTotalValue = new Prisma.Decimal(0);
 
       for (const tx of unmatchedBankTx) {
         const diffDays = Math.floor((now - new Date(tx.transactionDate).getTime()) / (1000 * 60 * 60 * 24));
@@ -112,7 +113,8 @@ agingRouter.get('/analysis', requirePermission('view_dashboard'), async (req, re
 
         if (inBucket) {
           bankCount++;
-          bankTotalValue += Math.abs(Number(tx.signedAmount));
+          const absVal = tx.signedAmount.isNegative() ? tx.signedAmount.negated() : tx.signedAmount;
+          bankTotalValue = bankTotalValue.plus(absVal);
         }
       }
 
@@ -123,9 +125,12 @@ agingRouter.get('/analysis', requirePermission('view_dashboard'), async (req, re
 
         if (inBucket) {
           glCount++;
-          glTotalValue += Math.abs(Number(tx.amount));
+          const absVal = tx.amount.isNegative() ? tx.amount.negated() : tx.amount;
+          glTotalValue = glTotalValue.plus(absVal);
         }
       }
+
+      const combinedVal = bankTotalValue.plus(glTotalValue);
 
       return {
         bucketId: bucket.id,
@@ -135,23 +140,32 @@ agingRouter.get('/analysis', requirePermission('view_dashboard'), async (req, re
         displayOrder: bucket.displayOrder,
         bankTransactions: {
           count: bankCount,
-          totalValue: bankTotalValue,
+          totalValue: bankTotalValue.toString(),
         },
         glTransactions: {
           count: glCount,
-          totalValue: glTotalValue,
+          totalValue: glTotalValue.toString(),
         },
-        combinedOutstandingValue: bankTotalValue + glTotalValue,
+        combinedOutstandingValue: combinedVal.toString(),
       };
     });
+
+    const totalOutstandingBankValue = unmatchedBankTx.reduce(
+      (sum, tx) => sum.plus(tx.signedAmount.isNegative() ? tx.signedAmount.negated() : tx.signedAmount),
+      new Prisma.Decimal(0)
+    );
+    const totalOutstandingGLValue = unmatchedGLTx.reduce(
+      (sum, tx) => sum.plus(tx.amount.isNegative() ? tx.amount.negated() : tx.amount),
+      new Prisma.Decimal(0)
+    );
 
     res.json({
       buckets: bucketResults,
       summary: {
         totalUnmatchedBankTx: unmatchedBankTx.length,
         totalUnmatchedGLTx: unmatchedGLTx.length,
-        totalOutstandingBankValue: unmatchedBankTx.reduce((sum, tx) => sum + Math.abs(Number(tx.signedAmount)), 0),
-        totalOutstandingGLValue: unmatchedGLTx.reduce((sum, tx) => sum + Math.abs(Number(tx.amount)), 0),
+        totalOutstandingBankValue: totalOutstandingBankValue.toString(),
+        totalOutstandingGLValue: totalOutstandingGLValue.toString(),
       },
     });
   } catch (error) {
