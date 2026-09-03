@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { Prisma } from '@prisma/client';
+import { prisma } from '../server/db';
 import { proposeAutoMatchesHandler } from '../server/routes/reconciliationRoutes';
 
 describe('Workflow State Machine & Reconciliation Matching Guard Logic', () => {
@@ -105,21 +106,17 @@ describe('Workflow State Machine & Reconciliation Matching Guard Logic', () => {
     expect(auditPayload.action).toBe('MATCH_CREATED');
   });
 
-  it('7. Proves production automatic reconciliation execution endpoint returns HTTP 501 (PHASE_3_DEFERRED) and cannot create matches or mutate transaction statuses', async () => {
-    // Initial state tracking
-    const sampleBankTransactions = [
-      { id: 'btx-1', amount: new Prisma.Decimal('5000.00'), status: 'UNMATCHED', reference: 'REF-001' },
-      { id: 'btx-2', amount: new Prisma.Decimal('1250.50'), status: 'UNMATCHED', reference: 'REF-002' },
-    ];
-    const sampleGlTransactions = [
-      { id: 'gtx-1', amount: new Prisma.Decimal('5000.00'), status: 'UNMATCHED', reference: 'REF-001' },
-      { id: 'gtx-2', amount: new Prisma.Decimal('1250.50'), status: 'UNMATCHED', reference: 'REF-002' },
-    ];
-    const existingMatches: any[] = [];
-
-    const initialMatchCount = existingMatches.length;
-    const initialBankStatuses = sampleBankTransactions.map((t) => t.status);
-    const initialGlStatuses = sampleGlTransactions.map((t) => t.status);
+  it('7. Proves production automatic reconciliation execution endpoint returns HTTP 501 (PHASE_3_DEFERRED) with zero Prisma operations', async () => {
+    // Spy on Prisma methods to prove ZERO database operations are invoked
+    const findPeriodSpy = vi.spyOn(prisma.reconciliationPeriod, 'findFirst');
+    const findBankTxSpy = vi.spyOn(prisma.bankTransaction, 'findMany');
+    const findGlTxSpy = vi.spyOn(prisma.glTransaction, 'findMany');
+    const txSpy = vi.spyOn(prisma, '$transaction');
+    const matchCreateSpy = vi.spyOn(prisma.reconciliationMatch, 'create');
+    const btxMatchCreateSpy = vi.spyOn(prisma.bankTransactionMatch, 'create');
+    const gtxMatchCreateSpy = vi.spyOn(prisma.glTransactionMatch, 'create');
+    const btxUpdateSpy = vi.spyOn(prisma.bankTransaction, 'update');
+    const gtxUpdateSpy = vi.spyOn(prisma.glTransaction, 'update');
 
     const mockReq = {
       organization: { id: 'org-test-123' },
@@ -140,24 +137,32 @@ describe('Workflow State Machine & Reconciliation Matching Guard Logic', () => {
       },
     };
 
-    // Invoke the actual production handler directly from server/routes/reconciliationRoutes.ts
-    await proposeAutoMatchesHandler(mockReq as any, mockRes as any);
+    try {
+      // Invoke the actual production handler directly from server/routes/reconciliationRoutes.ts
+      await proposeAutoMatchesHandler(mockReq as any, mockRes as any);
 
-    // 1. Assert HTTP status 501 Not Implemented
-    expect(mockRes.statusCode).toBe(501);
+      // 1. Assert HTTP status 501 Not Implemented
+      expect(mockRes.statusCode).toBe(501);
 
-    // 2. Assert Phase 3 Deferred machine-readable response payload
-    expect(mockRes.jsonData.status).toBe('DEFERRED');
-    expect(mockRes.jsonData.phase).toBe('PHASE_3_DEFERRED');
-    expect(mockRes.jsonData.error).toBe('Not Implemented');
-    expect(mockRes.jsonData.message).toBe('Automatic reconciliation engine execution is deferred to Phase 3.');
+      // 2. Assert Phase 3 Deferred machine-readable response payload
+      expect(mockRes.jsonData.status).toBe('DEFERRED');
+      expect(mockRes.jsonData.phase).toBe('PHASE_3_DEFERRED');
+      expect(mockRes.jsonData.error).toBe('Not Implemented');
+      expect(mockRes.jsonData.message).toBe('Automatic reconciliation engine execution is deferred to Phase 3.');
 
-    // 3. Assert zero database side effects: match count unchanged, zero junction records, transaction statuses unmodified
-    expect(existingMatches.length).toBe(initialMatchCount);
-    expect(sampleBankTransactions.map((t) => t.status)).toEqual(initialBankStatuses);
-    expect(sampleGlTransactions.map((t) => t.status)).toEqual(initialGlStatuses);
-    expect(sampleBankTransactions.every((t) => t.status === 'UNMATCHED')).toBe(true);
-    expect(sampleGlTransactions.every((t) => t.status === 'UNMATCHED')).toBe(true);
+      // 3. Assert zero Prisma / database operations were executed
+      expect(findPeriodSpy).not.toHaveBeenCalled();
+      expect(findBankTxSpy).not.toHaveBeenCalled();
+      expect(findGlTxSpy).not.toHaveBeenCalled();
+      expect(txSpy).not.toHaveBeenCalled();
+      expect(matchCreateSpy).not.toHaveBeenCalled();
+      expect(btxMatchCreateSpy).not.toHaveBeenCalled();
+      expect(gtxMatchCreateSpy).not.toHaveBeenCalled();
+      expect(btxUpdateSpy).not.toHaveBeenCalled();
+      expect(gtxUpdateSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it('8. Verifies Phase 1 matching topology data structures support 1:1, 1:Many, Many:1, Many:Many, Manual, and Adjustment', () => {
