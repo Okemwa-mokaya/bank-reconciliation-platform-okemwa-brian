@@ -488,6 +488,57 @@ export async function seedDatabase() {
     },
   });
 
+  // 8b. Seed Bank and Bank Account for Org2 (Multi-Tenant Isolation Foundation)
+  const bnpBank = await prisma.bank.upsert({
+    where: {
+      organizationId_name: {
+        organizationId: org2.id,
+        name: 'BNP Paribas Commercial',
+      },
+    },
+    update: {
+      swiftCode: 'BNPAFR22',
+      routingNumber: '3000400001',
+      country: 'FR',
+    },
+    create: {
+      organizationId: org2.id,
+      name: 'BNP Paribas Commercial',
+      swiftCode: 'BNPAFR22',
+      routingNumber: '3000400001',
+      country: 'FR',
+      status: 'ACTIVE',
+    },
+  });
+
+  await prisma.bankAccount.upsert({
+    where: {
+      organizationId_bankId_accountNumber: {
+        organizationId: org2.id,
+        bankId: bnpBank.id,
+        accountNumber: 'BNP-EUR-7731',
+      },
+    },
+    update: {
+      accountName: 'Apex European Operations Account',
+      currency: 'EUR',
+      accountType: 'OPERATING',
+      openingBalance: 2100000.0,
+      currentBalance: 2100000.0,
+    },
+    create: {
+      organizationId: org2.id,
+      bankId: bnpBank.id,
+      accountName: 'Apex European Operations Account',
+      accountNumber: 'BNP-EUR-7731',
+      currency: 'EUR',
+      accountType: 'OPERATING',
+      status: 'ACTIVE',
+      openingBalance: 2100000.0,
+      currentBalance: 2100000.0,
+    },
+  });
+
   // 9. Seed Default Matching Rules and Tolerances for Org1
   await prisma.matchingRule.upsert({
     where: {
