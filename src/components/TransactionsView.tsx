@@ -1,27 +1,43 @@
 import React, { useState } from 'react';
-import { BankTransaction, GLTransaction } from '../types';
-import { Layers, Database, Code, CheckCircle2, Clock, Filter } from 'lucide-react';
+import { BankTransaction, GLTransaction, BankAccount } from '../types';
+import {
+  Layers,
+  Database,
+  Code,
+  CheckCircle2,
+  Clock,
+  Filter,
+  Upload,
+  AlertTriangle,
+  Hash,
+  FileSpreadsheet,
+} from 'lucide-react';
+import { DataIngestionModal } from './DataIngestionModal';
 
 interface TransactionsViewProps {
   bankTransactions: BankTransaction[];
   glTransactions: GLTransaction[];
+  accounts?: BankAccount[];
   onRefresh: () => void;
 }
 
 export const TransactionsView: React.FC<TransactionsViewProps> = ({
   bankTransactions,
   glTransactions,
+  accounts = [],
+  onRefresh,
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<'bank' | 'gl'>('bank');
   const [filterStatus, setFilterStatus] = useState<string>('ALL');
   const [selectedTxRaw, setSelectedTxRaw] = useState<{ title: string; json: string } | null>(null);
+  const [isUploadOpen, setIsUploadOpen] = useState(false);
 
   const formatCurrency = (val: number, curr = 'USD') => {
     return new Intl.NumberFormat('en-US', {
       style: 'currency',
       currency: curr,
       minimumFractionDigits: 2,
-    }).format(val);
+    }).format(val || 0);
   };
 
   const formatDate = (dateStr: string) => {
@@ -47,16 +63,16 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
         <div>
           <h2 className="text-lg font-bold text-stone-900">Ingested Financial Transactions</h2>
           <p className="text-xs text-stone-500">
-            Immutable source transactions preserving raw payloads, reference tracking, and match statuses
+            Immutable source transactions preserving raw payloads, reference tracking, fingerprints, and match statuses
           </p>
         </div>
 
-        <div className="flex items-center space-x-3">
+        <div className="flex flex-wrap items-center gap-3">
           {/* Subtab toggle */}
           <div className="bg-stone-100 p-1 rounded-lg flex space-x-1 text-xs">
             <button
               onClick={() => setActiveSubTab('bank')}
-              className={`px-3 py-1.5 rounded-md font-semibold transition-colors ${
+              className={`px-3 py-1.5 rounded-md font-semibold transition-colors cursor-pointer ${
                 activeSubTab === 'bank'
                   ? 'bg-white text-stone-900 shadow-2xs'
                   : 'text-stone-600 hover:text-stone-900'
@@ -66,7 +82,7 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
             </button>
             <button
               onClick={() => setActiveSubTab('gl')}
-              className={`px-3 py-1.5 rounded-md font-semibold transition-colors ${
+              className={`px-3 py-1.5 rounded-md font-semibold transition-colors cursor-pointer ${
                 activeSubTab === 'gl'
                   ? 'bg-white text-stone-900 shadow-2xs'
                   : 'text-stone-600 hover:text-stone-900'
@@ -82,13 +98,22 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
             <select
               value={filterStatus}
               onChange={(e) => setFilterStatus(e.target.value)}
-              className="bg-transparent font-medium text-stone-800 focus:outline-none cursor-pointer text-xs"
+              className="bg-transparent font-medium text-stone-800 focus:outline-hidden cursor-pointer text-xs"
             >
               <option value="ALL">All Statuses</option>
               <option value="UNMATCHED">Unmatched</option>
               <option value="MATCHED">Matched</option>
             </select>
           </div>
+
+          {/* Ingest Action Button */}
+          <button
+            onClick={() => setIsUploadOpen(true)}
+            className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors cursor-pointer"
+          >
+            <Upload className="w-3.5 h-3.5" />
+            <span>Ingest {activeSubTab === 'bank' ? 'Statement' : 'GL Data'}</span>
+          </button>
         </div>
       </div>
 
@@ -120,9 +145,20 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
                 ) : (
                   filteredBankTx.map((tx) => (
                     <tr key={tx.id} className="hover:bg-stone-50/60 transition-colors">
-                      <td className="px-4 py-3 font-mono text-stone-700">{formatDate(tx.transactionDate)}</td>
-                      <td className="px-4 py-3 font-medium text-stone-900 max-w-xs truncate">
-                        {tx.description}
+                      <td className="px-4 py-3 font-mono text-stone-700 whitespace-nowrap">
+                        {formatDate(tx.transactionDate)}
+                      </td>
+                      <td className="px-4 py-3 font-medium text-stone-900 max-w-xs">
+                        <div className="truncate">{tx.description}</div>
+                        {tx.isSuspectedDuplicate && (
+                          <div
+                            className="inline-flex items-center space-x-1 mt-0.5 text-[10px] font-semibold text-amber-700 bg-amber-50 px-1.5 py-0.2 rounded border border-amber-200/80"
+                            title={tx.duplicateReason || 'Suspected Duplicate Transaction'}
+                          >
+                            <AlertTriangle className="w-3 h-3 text-amber-600" />
+                            <span>Suspected Duplicate</span>
+                          </div>
+                        )}
                       </td>
                       <td className="px-4 py-3 font-mono text-stone-500">{tx.referenceNumber || '—'}</td>
                       <td className="px-4 py-3">
@@ -154,14 +190,14 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
                         <button
                           onClick={() =>
                             setSelectedTxRaw({
-                              title: `Bank Transaction: ${tx.description}`,
+                              title: `Bank Transaction: ${tx.description} (${formatDate(tx.transactionDate)})`,
                               json: tx.originalImportedData,
                             })
                           }
-                          className="inline-flex items-center space-x-1 px-2 py-1 text-[11px] font-medium bg-stone-100 hover:bg-stone-200 text-stone-700 rounded transition-colors"
+                          className="inline-flex items-center space-x-1 text-stone-500 hover:text-stone-800 bg-stone-100 hover:bg-stone-200 px-2 py-1 rounded text-[11px] transition-colors cursor-pointer"
                         >
-                          <Code className="w-3 h-3 text-stone-500" />
-                          <span>Raw Source</span>
+                          <Code className="w-3.5 h-3.5" />
+                          <span>View Raw</span>
                         </button>
                       </td>
                     </tr>
@@ -174,9 +210,8 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
               <thead className="bg-stone-50 text-stone-600 border-b border-stone-200 font-semibold uppercase tracking-wider text-[10px]">
                 <tr>
                   <th className="px-4 py-3">Date</th>
-                  <th className="px-4 py-3">GL Narration</th>
+                  <th className="px-4 py-3">Narration / Description</th>
                   <th className="px-4 py-3">Ref / Journal #</th>
-                  <th className="px-4 py-3">Customer / Supplier</th>
                   <th className="px-4 py-3">Source System</th>
                   <th className="px-4 py-3 text-right">Debit</th>
                   <th className="px-4 py-3 text-right">Credit</th>
@@ -188,20 +223,36 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
               <tbody className="divide-y divide-stone-100">
                 {filteredGLTx.length === 0 ? (
                   <tr>
-                    <td colSpan={10} className="px-4 py-8 text-center text-stone-500 italic">
+                    <td colSpan={9} className="px-4 py-8 text-center text-stone-500 italic">
                       No GL transactions match the current filter.
                     </td>
                   </tr>
                 ) : (
                   filteredGLTx.map((tx) => (
                     <tr key={tx.id} className="hover:bg-stone-50/60 transition-colors">
-                      <td className="px-4 py-3 font-mono text-stone-700">{formatDate(tx.transactionDate)}</td>
-                      <td className="px-4 py-3 font-medium text-stone-900 max-w-xs truncate">{tx.narration}</td>
-                      <td className="px-4 py-3 font-mono text-stone-500">
-                        {tx.journalNumber || tx.referenceNumber || '—'}
+                      <td className="px-4 py-3 font-mono text-stone-700 whitespace-nowrap">
+                        {formatDate(tx.transactionDate)}
                       </td>
-                      <td className="px-4 py-3 text-stone-600">{tx.customerSupplier || '—'}</td>
-                      <td className="px-4 py-3 font-mono text-[10px] text-stone-500">{tx.sourceSystem}</td>
+                      <td className="px-4 py-3 font-medium text-stone-900 max-w-xs">
+                        <div className="truncate">{tx.narration}</div>
+                        {tx.isSuspectedDuplicate && (
+                          <div
+                            className="inline-flex items-center space-x-1 mt-0.5 text-[10px] font-semibold text-amber-700 bg-amber-50 px-1.5 py-0.2 rounded border border-amber-200/80"
+                            title={tx.duplicateReason || 'Suspected Duplicate Transaction'}
+                          >
+                            <AlertTriangle className="w-3 h-3 text-amber-600" />
+                            <span>Suspected Duplicate</span>
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 font-mono text-stone-500">
+                        {tx.referenceNumber || tx.journalNumber || '—'}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-medium bg-stone-100 text-stone-700">
+                          {tx.sourceSystem}
+                        </span>
+                      </td>
                       <td className="px-4 py-3 text-right font-mono text-stone-600">
                         {tx.debit > 0 ? formatCurrency(tx.debit, tx.currency) : '—'}
                       </td>
@@ -226,14 +277,14 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
                         <button
                           onClick={() =>
                             setSelectedTxRaw({
-                              title: `GL Journal Item: ${tx.narration}`,
+                              title: `GL Transaction: ${tx.narration} (${formatDate(tx.transactionDate)})`,
                               json: tx.originalData,
                             })
                           }
-                          className="inline-flex items-center space-x-1 px-2 py-1 text-[11px] font-medium bg-stone-100 hover:bg-stone-200 text-stone-700 rounded transition-colors"
+                          className="inline-flex items-center space-x-1 text-stone-500 hover:text-stone-800 bg-stone-100 hover:bg-stone-200 px-2 py-1 rounded text-[11px] transition-colors cursor-pointer"
                         >
-                          <Code className="w-3 h-3 text-stone-500" />
-                          <span>Raw Source</span>
+                          <Code className="w-3.5 h-3.5" />
+                          <span>View Raw</span>
                         </button>
                       </td>
                     </tr>
@@ -245,29 +296,56 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
         </div>
       </div>
 
-      {/* Raw Source JSON Modal */}
+      {/* Raw Payload Modal */}
       {selectedTxRaw && (
-        <div className="bg-stone-900 text-stone-100 border border-stone-800 rounded-xl p-5 shadow-lg">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center space-x-2">
-              <Database className="w-4 h-4 text-amber-400" />
-              <h3 className="text-sm font-bold text-white">{selectedTxRaw.title}</h3>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-950/60 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-xl w-full p-6 border border-stone-200 space-y-4 animate-in fade-in duration-150">
+            <div className="flex items-center justify-between border-b border-stone-200 pb-3">
+              <h3 className="text-sm font-bold text-stone-900 truncate pr-2">{selectedTxRaw.title}</h3>
+              <button
+                onClick={() => setSelectedTxRaw(null)}
+                className="p-1 rounded-lg text-stone-400 hover:text-stone-700 cursor-pointer"
+              >
+                ✕
+              </button>
             </div>
-            <button
-              onClick={() => setSelectedTxRaw(null)}
-              className="text-xs text-stone-400 hover:text-white font-semibold"
-            >
-              Close
-            </button>
+
+            <div className="space-y-1.5">
+              <span className="text-xs font-semibold text-stone-700">Raw Immutable Payload:</span>
+              <pre className="p-3 bg-stone-900 text-emerald-400 text-xs font-mono rounded-xl overflow-x-auto max-h-72">
+                {(() => {
+                  try {
+                    return JSON.stringify(JSON.parse(selectedTxRaw.json), null, 2);
+                  } catch {
+                    return selectedTxRaw.json;
+                  }
+                })()}
+              </pre>
+            </div>
+
+            <div className="flex justify-end pt-2">
+              <button
+                onClick={() => setSelectedTxRaw(null)}
+                className="px-4 py-2 bg-stone-900 text-white rounded-lg text-xs font-semibold hover:bg-stone-800 cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
           </div>
-          <p className="text-xs text-stone-400 mb-2">
-            Verbatim financial source payload preserved for non-repudiation and audit compliance:
-          </p>
-          <pre className="bg-stone-950 p-4 rounded-lg font-mono text-xs text-emerald-400 overflow-x-auto border border-stone-800">
-            {JSON.stringify(JSON.parse(selectedTxRaw.json || '{}'), null, 2)}
-          </pre>
         </div>
       )}
+
+      {/* Upload Modal */}
+      <DataIngestionModal
+        isOpen={isUploadOpen}
+        onClose={() => setIsUploadOpen(false)}
+        accounts={accounts}
+        initialMode={activeSubTab === 'bank' ? 'BANK_STATEMENT' : 'GL_IMPORT'}
+        onSuccess={() => {
+          onRefresh();
+          setIsUploadOpen(false);
+        }}
+      />
     </div>
   );
 };

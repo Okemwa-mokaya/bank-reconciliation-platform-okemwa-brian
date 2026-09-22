@@ -27,8 +27,13 @@ const PORT = 3000;
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// System & Health Endpoints (Public)
-app.use('/api/system', systemRouter);
+// System Endpoints with Authentication & Role-Based Authorization
+app.use('/api/system', authMiddleware, systemRouter);
+
+// Public Health Endpoint
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
 
 // Protected API Routes with Auth & Tenancy Isolation
 app.use('/api/auth', authMiddleware, authRouter);

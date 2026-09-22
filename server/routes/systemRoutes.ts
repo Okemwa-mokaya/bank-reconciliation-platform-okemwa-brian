@@ -1,11 +1,12 @@
 import { Router } from 'express';
 import { prisma, checkDatabaseConnection } from '../db';
 import { seedDatabase } from '../seed';
+import { requireRole } from '../middleware/rbac';
 
 export const systemRouter = Router();
 
-// Database connection health probe
-systemRouter.get('/health', async (req, res) => {
+// Database connection health probe (Public)
+export const getSystemHealthHandler = async (req: any, res: any) => {
   const dbStatus = await checkDatabaseConnection();
   res.json({
     status: dbStatus.ok ? 'HEALTHY' : 'UNHEALTHY',
@@ -22,10 +23,10 @@ systemRouter.get('/health', async (req, res) => {
       auditTrail: 'Cryptographically consistent, immutable, timestamped event log',
     },
   });
-});
+};
 
-// Database schema introspection & entity statistics
-systemRouter.get('/schema-info', async (req, res) => {
+// Database schema introspection & entity statistics (Requires Authentication and Administrative Authorization)
+export const getSchemaInfoHandler = async (req: any, res: any) => {
   try {
     const [
       orgs,
@@ -91,10 +92,10 @@ systemRouter.get('/schema-info', async (req, res) => {
     console.error('Error fetching schema info:', error);
     res.status(500).json({ error: 'Failed to fetch schema statistics' });
   }
-});
+};
 
-// Re-seed trigger (for testing / reset)
-systemRouter.post('/seed', async (req, res) => {
+// Re-seed trigger (Requires Authentication and Administrative Authorization)
+export const postSeedHandler = async (req: any, res: any) => {
   try {
     await seedDatabase();
     res.json({ success: true, message: 'Database foundation seeded successfully' });
@@ -102,4 +103,8 @@ systemRouter.post('/seed', async (req, res) => {
     console.error('Error seeding database:', error);
     res.status(500).json({ error: 'Failed to seed database' });
   }
-});
+};
+
+systemRouter.get('/health', getSystemHealthHandler);
+systemRouter.get('/schema-info', requireRole(['ADMIN']), getSchemaInfoHandler);
+systemRouter.post('/seed', requireRole(['ADMIN']), postSeedHandler);

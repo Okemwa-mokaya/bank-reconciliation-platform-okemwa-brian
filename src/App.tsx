@@ -148,13 +148,18 @@ export default function App() {
         )}
 
         {activeTab === 'statements' && (
-          <StatementsView statements={statements} onRefresh={loadAllData} />
+          <StatementsView
+            statements={statements}
+            accounts={accounts}
+            onRefresh={loadAllData}
+          />
         )}
 
         {activeTab === 'transactions' && (
           <TransactionsView
             bankTransactions={bankTransactions}
             glTransactions={glTransactions}
+            accounts={accounts}
             onRefresh={loadAllData}
           />
         )}

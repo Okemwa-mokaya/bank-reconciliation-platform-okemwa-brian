@@ -5,6 +5,8 @@ import { recordAuditEvent } from '../services/auditService';
 import { Prisma } from '@prisma/client';
 import crypto from 'crypto';
 import { CreateBankTransactionSchema, CreateGlTransactionSchema } from '../validators/schemas';
+import { uploadMiddleware } from '../middleware/upload';
+import { previewIngestionFile, ingestGlData } from '../services/ingestion/ingestionPipeline';
 
 export const transactionRouter = Router();
 
@@ -299,3 +301,135 @@ export const createGlTransactionHandler = async (req: any, res: any) => {
 };
 
 transactionRouter.post('/gl', requirePermission('upload_gl'), createGlTransactionHandler);
+
+// GL File Preview Endpoint
+transactionRouter.post(
+  '/gl/preview',
+  requirePermission('upload_gl'),
+  uploadMiddleware.single('file'),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded. Please upload a CSV, XLSX, or PDF file.' });
+      }
+
+      let userMapping;
+      if (req.body.columnMapping) {
+        try {
+          userMapping = typeof req.body.columnMapping === 'string'
+            ? JSON.parse(req.body.columnMapping)
+            : req.body.columnMapping;
+        } catch {
+          // ignore
+        }
+      }
+
+      const preview = await previewIngestionFile({
+        fileBuffer: req.file.buffer,
+        originalFilename: req.file.originalname,
+        sourceType: 'GL_IMPORT',
+        userMapping,
+      });
+
+      res.json(preview);
+    } catch (error: any) {
+      console.error('Error previewing GL file:', error);
+      res.status(400).json({ error: error.message || 'Failed to preview GL file' });
+    }
+  }
+);
+
+// GL File Ingestion Upload Endpoint
+transactionRouter.post(
+  '/gl/upload',
+  requirePermission('upload_gl'),
+  uploadMiddleware.single('file'),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded. Please upload a CSV, XLSX, or PDF file.' });
+      }
+
+      const orgId = req.organization!.id;
+      const { bankAccountId, sourceSystem = 'GENERAL_LEDGER', columnMapping } = req.body;
+
+      let parsedMapping;
+      if (columnMapping) {
+        try {
+          parsedMapping = typeof columnMapping === 'string' ? JSON.parse(columnMapping) : columnMapping;
+        } catch {
+          // ignore
+        }
+      }
+
+      const summary = await ingestGlData({
+        fileBuffer: req.file.buffer,
+        originalFilename: req.file.originalname,
+        clientMimeType: req.file.mimetype,
+        organizationId: orgId,
+        bankAccountId: bankAccountId || null,
+        uploadedById: req.user!.id,
+        sourceSystem,
+        userMapping: parsedMapping,
+      });
+
+      res.status(summary.status === 'DUPLICATE' ? 409 : 201).json({
+        summary,
+        message:
+          summary.status === 'DUPLICATE'
+            ? 'Duplicate file rejected: Exact source already exists'
+            : `Successfully ingested ${summary.successfullyImported} GL transactions (${summary.rejectedCount} rejected, ${summary.duplicateCount} duplicates)`,
+      });
+    } catch (error: any) {
+      console.error('Error during GL ingestion:', error);
+      res.status(400).json({ error: error.message || 'GL data ingestion failed' });
+    }
+  }
+);
+
+// List GL Imports
+transactionRouter.get('/gl/imports', requirePermission('view_transactions'), async (req, res) => {
+  try {
+    const orgId = req.organization!.id;
+    const imports = await prisma.glImport.findMany({
+      where: { organizationId: orgId },
+      include: {
+        bankAccount: { select: { id: true, accountName: true, accountNumber: true } },
+        uploadedBy: { select: { id: true, fullName: true, email: true } },
+        _count: { select: { transactions: true, rejectedRows: true } },
+      },
+      orderBy: { uploadedAt: 'desc' },
+    });
+
+    res.json({ imports });
+  } catch (error: any) {
+    console.error('Error fetching GL imports:', error);
+    res.status(500).json({ error: 'Failed to fetch GL imports' });
+  }
+});
+
+// Get Rejected Rows for a GL Import
+transactionRouter.get('/gl/imports/:id/rejected-rows', requirePermission('view_transactions'), async (req, res) => {
+  try {
+    const orgId = req.organization!.id;
+    const { id } = req.params;
+
+    const glImport = await prisma.glImport.findFirst({
+      where: { id, organizationId: orgId },
+    });
+    if (!glImport) {
+      return res.status(404).json({ error: 'GL import batch not found' });
+    }
+
+    const rejectedRows = await prisma.rejectedRow.findMany({
+      where: { glImportId: id, organizationId: orgId },
+      orderBy: { rowNumber: 'asc' },
+    });
+
+    res.json({ rejectedRows });
+  } catch (error: any) {
+    console.error('Error fetching GL rejected rows:', error);
+    res.status(500).json({ error: 'Failed to fetch GL rejected rows' });
+  }
+});
+

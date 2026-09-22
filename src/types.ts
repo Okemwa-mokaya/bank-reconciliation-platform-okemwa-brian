@@ -55,6 +55,53 @@ export interface StatementPage {
   extractionConfidence?: number | null;
 }
 
+export interface RejectedRow {
+  id: string;
+  statementId?: string | null;
+  glImportId?: string | null;
+  rowNumber: number;
+  pageNumber?: number | null;
+  sourceType: string;
+  rawRecord: string;
+  reason: string;
+  errorCode: string;
+  createdAt: string;
+}
+
+export interface GlImport {
+  id: string;
+  organizationId: string;
+  bankAccountId?: string | null;
+  originalFilename: string;
+  fileType: string;
+  fileSize: number;
+  fileHash: string;
+  processingStatus: string;
+  sourceSystem: string;
+  totalCredits: number;
+  totalDebits: number;
+  transactionCount: number;
+  validCount: number;
+  rejectedCount: number;
+  duplicateCount: number;
+  warningCount: number;
+  uploadedAt: string;
+  bankAccount?: {
+    id: string;
+    accountName: string;
+    accountNumber: string;
+  } | null;
+  uploadedBy?: {
+    id: string;
+    fullName: string;
+    email: string;
+  };
+  _count?: {
+    transactions: number;
+    rejectedRows: number;
+  };
+}
+
 export interface BankStatement {
   id: string;
   bankAccountId: string;
@@ -62,15 +109,24 @@ export interface BankStatement {
   statementPeriodEnd: string;
   originalFilename: string;
   fileType: string;
+  fileSize?: number;
+  fileHash?: string;
   processingStatus: string;
   extractionStatus: string;
   validationStatus: string;
   duplicateStatus: string;
+  extractionMethod?: string | null;
+  extractionConfidence?: number | null;
   openingBalance: number;
   closingBalance: number;
   totalCredits: number;
   totalDebits: number;
   transactionCount: number;
+  validCount?: number;
+  rejectedCount?: number;
+  duplicateCount?: number;
+  warningCount?: number;
+  warnings?: string | null;
   createdAt: string;
   bankAccount: {
     id: string;
@@ -98,6 +154,9 @@ export interface BankTransaction {
   signedAmount: number;
   balance?: number | null;
   originalImportedData: string;
+  transactionFingerprint?: string;
+  isSuspectedDuplicate?: boolean;
+  duplicateReason?: string | null;
   status: string;
   bankAccount?: { accountName: string; accountNumber: string };
 }
@@ -118,6 +177,9 @@ export interface GLTransaction {
   journalNumber?: string | null;
   sourceSystem: string;
   originalData: string;
+  transactionFingerprint?: string;
+  isSuspectedDuplicate?: boolean;
+  duplicateReason?: string | null;
   status: string;
   bankAccount?: { accountName: string; accountNumber: string } | null;
 }

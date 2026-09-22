@@ -32,23 +32,22 @@ const PUBLIC_PATHS = [
   '/api/auth/login',
   '/api/auth/demo-accounts',
   '/api/system/health',
-  '/api/system/schema-info',
-  '/api/system/seed',
   '/api/health',
 ];
 
 export async function authMiddleware(req: Request, res: Response, next: NextFunction) {
   try {
-    // 1. Allow public endpoints without authentication
+    // 1. Allow strictly permitted public endpoints without authentication
     const fullPath = (req.originalUrl || req.path || '').split('?')[0];
     const subPath = (req.path || '').split('?')[0];
 
-    if (
+    const isExplicitPublicPath =
       PUBLIC_PATHS.some((p) => fullPath === p || fullPath.startsWith(p + '/')) ||
       subPath === '/login' ||
       subPath === '/demo-accounts' ||
-      fullPath.startsWith('/api/system')
-    ) {
+      subPath === '/health';
+
+    if (isExplicitPublicPath) {
       return next();
     }
 

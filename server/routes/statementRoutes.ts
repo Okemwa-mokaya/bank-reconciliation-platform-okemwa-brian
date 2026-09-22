@@ -3,6 +3,8 @@ import { prisma } from '../db';
 import { requirePermission } from '../middleware/rbac';
 import { recordAuditEvent } from '../services/auditService';
 import { Prisma } from '@prisma/client';
+import { uploadMiddleware } from '../middleware/upload';
+import { previewIngestionFile, ingestBankStatement } from '../services/ingestion/ingestionPipeline';
 
 export const statementRouter = Router();
 
@@ -180,3 +182,172 @@ export const registerStatementHandler = async (req: any, res: any) => {
 
 statementRouter.post('/register', requirePermission('upload_statement'), registerStatementHandler);
 statementRouter.post('/', requirePermission('upload_statement'), registerStatementHandler);
+
+// File Preview Endpoint (inspect columns and samples without saving)
+statementRouter.post(
+  '/preview',
+  requirePermission('upload_statement'),
+  uploadMiddleware.single('file'),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded. Please provide a CSV, XLSX, or PDF file.' });
+      }
+
+      let userMapping;
+      if (req.body.columnMapping) {
+        try {
+          userMapping = typeof req.body.columnMapping === 'string'
+            ? JSON.parse(req.body.columnMapping)
+            : req.body.columnMapping;
+        } catch {
+          // ignore mapping parse error
+        }
+      }
+
+      const preview = await previewIngestionFile({
+        fileBuffer: req.file.buffer,
+        originalFilename: req.file.originalname,
+        sourceType: 'BANK_STATEMENT',
+        userMapping,
+      });
+
+      res.json(preview);
+    } catch (error: any) {
+      console.error('Error previewing statement file:', error);
+      res.status(400).json({ error: error.message || 'Failed to preview file' });
+    }
+  }
+);
+
+// File Ingestion Upload Endpoint
+statementRouter.post(
+  '/upload',
+  requirePermission('upload_statement'),
+  uploadMiddleware.single('file'),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded. Please upload a valid CSV, XLSX, or PDF document.' });
+      }
+
+      const orgId = req.organization!.id;
+      const { bankAccountId, statementPeriodStart, statementPeriodEnd, columnMapping } = req.body;
+
+      if (!bankAccountId) {
+        return res.status(400).json({ error: 'bankAccountId is required' });
+      }
+
+      let parsedMapping;
+      if (columnMapping) {
+        try {
+          parsedMapping = typeof columnMapping === 'string' ? JSON.parse(columnMapping) : columnMapping;
+        } catch {
+          // ignore
+        }
+      }
+
+      const summary = await ingestBankStatement({
+        fileBuffer: req.file.buffer,
+        originalFilename: req.file.originalname,
+        clientMimeType: req.file.mimetype,
+        organizationId: orgId,
+        bankAccountId,
+        uploadedById: req.user!.id,
+        periodStart: statementPeriodStart ? new Date(statementPeriodStart) : undefined,
+        periodEnd: statementPeriodEnd ? new Date(statementPeriodEnd) : undefined,
+        userMapping: parsedMapping,
+      });
+
+      res.status(summary.status === 'DUPLICATE' ? 409 : 201).json({
+        summary,
+        message:
+          summary.status === 'DUPLICATE'
+            ? 'Duplicate file rejected: Exact source already exists'
+            : `Successfully ingested ${summary.successfullyImported} transactions (${summary.rejectedCount} rejected, ${summary.duplicateCount} duplicates)`,
+      });
+    } catch (error: any) {
+      console.error('Error during statement ingestion:', error);
+      res.status(400).json({ error: error.message || 'Statement ingestion failed' });
+    }
+  }
+);
+
+// Get Rejected Rows for Statement
+statementRouter.get('/:id/rejected-rows', requirePermission('view_dashboard'), async (req, res) => {
+  try {
+    const orgId = req.organization!.id;
+    const { id } = req.params;
+
+    const statement = await prisma.bankStatement.findFirst({
+      where: { id, organizationId: orgId },
+    });
+    if (!statement) {
+      return res.status(404).json({ error: 'Statement not found' });
+    }
+
+    const rejectedRows = await prisma.rejectedRow.findMany({
+      where: { statementId: id, organizationId: orgId },
+      orderBy: { rowNumber: 'asc' },
+    });
+
+    res.json({ rejectedRows });
+  } catch (error: any) {
+    console.error('Error fetching rejected rows:', error);
+    res.status(500).json({ error: 'Failed to fetch rejected rows' });
+  }
+});
+
+// Get Ingestion Summary / Metrics
+statementRouter.get('/:id/summary', requirePermission('view_dashboard'), async (req, res) => {
+  try {
+    const orgId = req.organization!.id;
+    const { id } = req.params;
+
+    const statement = await prisma.bankStatement.findFirst({
+      where: { id, organizationId: orgId },
+      include: {
+        bankAccount: true,
+        uploadedBy: { select: { id: true, fullName: true, email: true } },
+        _count: {
+          select: {
+            transactions: true,
+            rejectedRows: true,
+            pages: true,
+          },
+        },
+      },
+    });
+
+    if (!statement) {
+      return res.status(404).json({ error: 'Statement not found' });
+    }
+
+    res.json({
+      summary: {
+        id: statement.id,
+        filename: statement.originalFilename,
+        fileHash: statement.fileHash,
+        fileSize: statement.fileSize,
+        fileType: statement.fileType,
+        processingStatus: statement.processingStatus,
+        extractionMethod: statement.extractionMethod,
+        extractionConfidence: statement.extractionConfidence,
+        totalDebits: statement.totalDebits,
+        totalCredits: statement.totalCredits,
+        transactionCount: statement.transactionCount,
+        validCount: statement.validCount,
+        rejectedCount: statement.rejectedCount,
+        duplicateCount: statement.duplicateCount,
+        warningCount: statement.warningCount,
+        uploadedAt: statement.uploadedAt,
+        uploadedBy: statement.uploadedBy,
+        bankAccount: statement.bankAccount,
+      },
+    });
+  } catch (error: any) {
+    console.error('Error fetching statement summary:', error);
+    res.status(500).json({ error: 'Failed to fetch statement summary' });
+  }
+});
+
