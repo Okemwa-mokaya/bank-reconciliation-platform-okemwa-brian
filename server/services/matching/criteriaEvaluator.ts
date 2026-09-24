@@ -431,34 +431,45 @@ export class CriteriaEvaluationService {
     };
 
     // 5. TRANSACTION_DATE (Additional)
-    const bankDate = new Date(bankTx.transactionDate);
-    const glDate = new Date(glTx.transactionDate);
-    const diffMs = Math.abs(bankDate.getTime() - glDate.getTime());
-    const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
+    const bankDate = bankTx.transactionDate ? new Date(bankTx.transactionDate) : null;
+    const isBankDateValid = bankDate !== null && !isNaN(bankDate.getTime());
+    const glDate = glTx.transactionDate ? new Date(glTx.transactionDate) : null;
+    const isGlDateValid = glDate !== null && !isNaN(glDate.getTime());
 
-    const isExactDate =
-      bankDate.getUTCFullYear() === glDate.getUTCFullYear() &&
-      bankDate.getUTCMonth() === glDate.getUTCMonth() &&
-      bankDate.getUTCDate() === glDate.getUTCDate();
+    let dateMatched = false;
+    let isExactDate = false;
+    let diffDays = 0;
 
-    const isDateWithinTol = tolerances.isDateToleranceAllowed && diffDays <= tolerances.dateToleranceDays;
-    const dateMatched = isExactDate || isDateWithinTol;
+    if (isBankDateValid && isGlDateValid && bankDate && glDate) {
+      const diffMs = Math.abs(bankDate.getTime() - glDate.getTime());
+      diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
+
+      isExactDate =
+        bankDate.getUTCFullYear() === glDate.getUTCFullYear() &&
+        bankDate.getUTCMonth() === glDate.getUTCMonth() &&
+        bankDate.getUTCDate() === glDate.getUTCDate();
+
+      const isDateWithinTol = tolerances.isDateToleranceAllowed && diffDays <= tolerances.dateToleranceDays;
+      dateMatched = isExactDate || isDateWithinTol;
+    }
 
     breakdown[CRITERION_CODES.TRANSACTION_DATE] = {
       code: CRITERION_CODES.TRANSACTION_DATE,
       name: 'Transaction Date',
       isStrong: false,
-      evaluated: true,
+      evaluated: Boolean(isBankDateValid && isGlDateValid),
       satisfied: dateMatched,
       score: isExactDate ? 1.0 : dateMatched ? Math.max(0.7, 1.0 - (diffDays / (tolerances.dateToleranceDays + 1)) * 0.3) : 0,
       reason: dateMatched
         ? isExactDate
           ? 'Exact date match'
           : `Date within tolerance (${diffDays} days difference <= ${tolerances.dateToleranceDays} allowed)`
-        : `Date mismatch (${diffDays} days difference exceeds allowed ${tolerances.dateToleranceDays} days)`,
+        : isBankDateValid && isGlDateValid
+        ? `Date mismatch (${diffDays} days difference exceeds allowed ${tolerances.dateToleranceDays} days)`
+        : 'Transaction date absent or invalid on one or both transactions',
       details: {
-        bankDate: bankDate.toISOString().slice(0, 10),
-        glDate: glDate.toISOString().slice(0, 10),
+        bankDate: isBankDateValid && bankDate ? bankDate.toISOString().slice(0, 10) : null,
+        glDate: isGlDateValid && glDate ? glDate.toISOString().slice(0, 10) : null,
         diffDays,
         allowedDays: tolerances.dateToleranceDays,
       },
@@ -585,6 +596,367 @@ export class CriteriaEvaluationService {
     const confidenceScore = eligible
       ? Math.min(1.0, Math.max(0.65, 0.50 + strongWeight * 0.30 + totalWeight * 0.20))
       : Math.min(0.49, (strongMetCount * 0.15) + (additionalMetCount * 0.08));
+
+    return {
+      eligible,
+      totalCriteriaEvaluated: evaluatedList.length,
+      totalCriteriaSatisfied: totalSatisfied,
+      strongCriteriaSatisfied: strongSatisfied,
+      criteriaEvaluated: evaluatedList,
+      criteriaSatisfied: satisfiedList,
+      criteriaFailed: failedList,
+      strongCriteriaList: strongSatisfiedList,
+      resolvedTolerances: tolerances,
+      confidenceScore: Math.round(confidenceScore * 100) / 100,
+      breakdown,
+      organizationIsolated,
+    };
+  }
+
+  /**
+   * Evaluates a group of bank transactions against a group of GL transactions (1:1, 1:many, many:1, many:many)
+   */
+  public static evaluateGroup(
+    bankTxs: EvaluatableBankTransaction[],
+    glTxs: EvaluatableGlTransaction[],
+    options: EvaluationOptions = {}
+  ): EvaluationSummary {
+    if (bankTxs.length === 1 && glTxs.length === 1) {
+      return this.evaluatePair(bankTxs[0], glTxs[0], options);
+    }
+
+    const minTotal = options.minTotalCriteria ?? 3;
+    const minStrong = options.minStrongCriteria ?? 2;
+    const narrationThreshold = options.narrationSimilarityThreshold ?? 0.65;
+    const counterpartyThreshold = options.counterpartySimilarityThreshold ?? 0.65;
+
+    const tolerances = options.tolerances ?? {
+      sourceLevel: 'DEFAULT',
+      amountToleranceType: 'FIXED',
+      amountToleranceValue: 0.0,
+      amountToleranceMax: null,
+      dateToleranceDays: 0,
+      isDateToleranceAllowed: false,
+      currencyRateTolerancePercent: 0.0,
+    };
+
+    // Organization Isolation Check
+    const orgIds = new Set<string>();
+    for (const b of bankTxs) {
+      if (b.organizationId) orgIds.add(b.organizationId);
+    }
+    for (const g of glTxs) {
+      if (g.organizationId) orgIds.add(g.organizationId);
+    }
+    const organizationIsolated = orgIds.size <= 1;
+
+    const breakdown: Record<CriterionCode, CriterionEvaluationResult> = {} as any;
+
+    // 1. AMOUNT (Strong) - Aggregate sum
+    const totalBankAmt = bankTxs.reduce((sum, b) => sum + Math.abs(toNumber(b.signedAmount)), 0);
+    const totalGlAmt = glTxs.reduce((sum, g) => sum + Math.abs(toNumber(g.amount)), 0);
+    const amountDiff = Math.abs(totalBankAmt - totalGlAmt);
+
+    let allowedAmountTolerance = 0;
+    if (tolerances.amountToleranceType === 'PERCENTAGE') {
+      const base = Math.max(totalBankAmt, totalGlAmt);
+      allowedAmountTolerance = (base * tolerances.amountToleranceValue) / 100;
+      if (tolerances.amountToleranceMax != null && tolerances.amountToleranceMax > 0) {
+        allowedAmountTolerance = Math.min(allowedAmountTolerance, tolerances.amountToleranceMax);
+      }
+    } else {
+      allowedAmountTolerance = tolerances.amountToleranceValue;
+    }
+
+    const isExactAmount = Math.abs(amountDiff) < 0.0001;
+    const isWithinAmountTolerance = amountDiff <= allowedAmountTolerance + 0.0001;
+    const amountMatched = isExactAmount || isWithinAmountTolerance;
+
+    breakdown[CRITERION_CODES.AMOUNT] = {
+      code: CRITERION_CODES.AMOUNT,
+      name: 'Transaction Amount',
+      isStrong: true,
+      evaluated: bankTxs.length > 0 && glTxs.length > 0,
+      satisfied: amountMatched,
+      score: isExactAmount ? 1.0 : amountMatched ? 0.9 : 0,
+      reason: amountMatched
+        ? isExactAmount
+          ? 'Exact aggregate amount match'
+          : `Aggregate amount within tolerance (diff: ${amountDiff.toFixed(2)} <= allowed: ${allowedAmountTolerance.toFixed(2)})`
+        : `Aggregate amount discrepancy (diff: ${amountDiff.toFixed(2)} exceeds allowed: ${allowedAmountTolerance.toFixed(2)})`,
+      details: { totalBankAmt, totalGlAmt, amountDiff, allowedAmountTolerance, isExactAmount },
+    };
+
+    // 2. REFERENCE_NUMBER (Strong)
+    const bankRefs = bankTxs.map((b) => b.referenceNumber?.trim()).filter(Boolean) as string[];
+    const glRefs = glTxs.map((g) => g.referenceNumber?.trim()).filter(Boolean) as string[];
+    let refExact = false;
+    let refNormalized = false;
+
+    if (bankRefs.length > 0 && glRefs.length > 0) {
+      for (const bRef of bankRefs) {
+        for (const gRef of glRefs) {
+          if (bRef === gRef) {
+            refExact = true;
+            break;
+          } else {
+            const normB = normalizeReference(bRef);
+            const normG = normalizeReference(gRef);
+            if (normB && normG && normB === normG) {
+              refNormalized = true;
+            }
+          }
+        }
+        if (refExact) break;
+      }
+    }
+    const refMatched = refExact || refNormalized;
+
+    breakdown[CRITERION_CODES.REFERENCE_NUMBER] = {
+      code: CRITERION_CODES.REFERENCE_NUMBER,
+      name: 'Reference Number',
+      isStrong: true,
+      evaluated: Boolean(bankRefs.length > 0 || glRefs.length > 0),
+      satisfied: refMatched,
+      score: refExact ? 1.0 : refNormalized ? 0.95 : 0,
+      reason: refMatched
+        ? refExact
+          ? 'Exact reference number match in group'
+          : 'Normalized reference number match in group'
+        : bankRefs.length > 0 && glRefs.length > 0
+        ? 'No matching reference numbers found between bank and GL transactions'
+        : 'Reference numbers absent on bank or GL transactions',
+      details: { bankRefs, glRefs, refExact, refNormalized },
+    };
+
+    // 3. CHEQUE_NUMBER (Strong)
+    const bankCheques = bankTxs.map((b) => b.chequeNumber?.trim()).filter(Boolean) as string[];
+    const glCheques = glTxs.map((g) => g.chequeNumber?.trim()).filter(Boolean) as string[];
+    let chequeMatched = false;
+
+    if (bankCheques.length > 0 && glCheques.length > 0) {
+      for (const bC of bankCheques) {
+        for (const gC of glCheques) {
+          const normB = normalizeReference(bC);
+          const normG = normalizeReference(gC);
+          if (normB && normG && normB === normG) {
+            chequeMatched = true;
+            break;
+          }
+        }
+        if (chequeMatched) break;
+      }
+    }
+
+    breakdown[CRITERION_CODES.CHEQUE_NUMBER] = {
+      code: CRITERION_CODES.CHEQUE_NUMBER,
+      name: 'Cheque / Check Number',
+      isStrong: true,
+      evaluated: Boolean(bankCheques.length > 0 || glCheques.length > 0),
+      satisfied: chequeMatched,
+      score: chequeMatched ? 1.0 : 0,
+      reason: chequeMatched
+        ? 'Cheque number match in group'
+        : bankCheques.length > 0 && glCheques.length > 0
+        ? 'No matching cheque numbers found'
+        : 'Cheque numbers absent on bank or GL transactions',
+      details: { bankCheques, glCheques },
+    };
+
+    // 4. ACCOUNT_NUMBER (Strong)
+    const bankAccs = bankTxs.map((b) => b.accountNumber?.trim()).filter(Boolean) as string[];
+    const glAccs = glTxs.map((g) => g.accountNumber?.trim()).filter(Boolean) as string[];
+    let accMatched = false;
+
+    if (bankAccs.length > 0 && glAccs.length > 0) {
+      for (const bA of bankAccs) {
+        for (const gA of glAccs) {
+          const normB = normalizeReference(bA);
+          const normG = normalizeReference(gA);
+          if (normB && normG && normB === normG) {
+            accMatched = true;
+            break;
+          }
+        }
+        if (accMatched) break;
+      }
+    }
+
+    breakdown[CRITERION_CODES.ACCOUNT_NUMBER] = {
+      code: CRITERION_CODES.ACCOUNT_NUMBER,
+      name: 'Account Number',
+      isStrong: true,
+      evaluated: Boolean(bankAccs.length > 0 || glAccs.length > 0),
+      satisfied: accMatched,
+      score: accMatched ? 1.0 : 0,
+      reason: accMatched
+        ? 'Account number match in group'
+        : bankAccs.length > 0 && glAccs.length > 0
+        ? 'No matching account numbers found'
+        : 'Account numbers absent on bank or GL transactions',
+      details: { bankAccs, glAccs },
+    };
+
+    // 5. TRANSACTION_DATE (Additional)
+    const bankDates = bankTxs
+      .map((b) => (b.transactionDate ? new Date(b.transactionDate) : null))
+      .filter((d): d is Date => d !== null && !isNaN(d.getTime()));
+    const glDates = glTxs
+      .map((g) => (g.transactionDate ? new Date(g.transactionDate) : null))
+      .filter((d): d is Date => d !== null && !isNaN(d.getTime()));
+
+    let dateMatched = false;
+    let isExactDate = false;
+    let maxDateDiffDays = 0;
+
+    if (bankDates.length > 0 && glDates.length > 0) {
+      const bankTimes = bankDates.map((d) => d.getTime());
+      const glTimes = glDates.map((d) => d.getTime());
+      const minBank = Math.min(...bankTimes);
+      const maxBank = Math.max(...bankTimes);
+      const minGl = Math.min(...glTimes);
+      const maxGl = Math.max(...glTimes);
+
+      const spanDiffMs = Math.max(Math.abs(minBank - minGl), Math.abs(maxBank - maxGl));
+      maxDateDiffDays = Math.round(spanDiffMs / (1000 * 60 * 60 * 24));
+
+      isExactDate = maxDateDiffDays === 0;
+      const isDateWithinTol = tolerances.isDateToleranceAllowed && maxDateDiffDays <= tolerances.dateToleranceDays;
+      dateMatched = isExactDate || isDateWithinTol;
+    }
+
+    breakdown[CRITERION_CODES.TRANSACTION_DATE] = {
+      code: CRITERION_CODES.TRANSACTION_DATE,
+      name: 'Transaction Date',
+      isStrong: false,
+      evaluated: bankDates.length > 0 && glDates.length > 0,
+      satisfied: dateMatched,
+      score: isExactDate ? 1.0 : dateMatched ? Math.max(0.7, 1.0 - (maxDateDiffDays / (tolerances.dateToleranceDays + 1)) * 0.3) : 0,
+      reason: dateMatched
+        ? isExactDate
+          ? 'Exact date span match in group'
+          : `Date span within tolerance (${maxDateDiffDays} days difference <= ${tolerances.dateToleranceDays} allowed)`
+        : `Date span mismatch (${maxDateDiffDays} days difference exceeds allowed ${tolerances.dateToleranceDays} days)`,
+      details: { maxDateDiffDays, allowedDays: tolerances.dateToleranceDays },
+    };
+
+    // 6. TRANSACTION_TYPE (Additional)
+    const bankTypes = Array.from(new Set(bankTxs.map((b) => (b.transactionType || '').toUpperCase().trim()).filter(Boolean)));
+    const glTypes = Array.from(new Set(glTxs.map((g) => (g.transactionType || '').toUpperCase().trim()).filter(Boolean)));
+    let typeMatched = false;
+
+    if (bankTypes.length > 0 && glTypes.length > 0) {
+      typeMatched = bankTypes.every((bt) =>
+        glTypes.some(
+          (gt) =>
+            bt === gt ||
+            (bt === 'DEBIT' && gt === 'DEBIT') ||
+            (bt === 'CREDIT' && gt === 'CREDIT') ||
+            (bt === 'TRANSFER' && (gt === 'JOURNAL' || gt === 'TRANSFER'))
+        )
+      );
+    }
+
+    breakdown[CRITERION_CODES.TRANSACTION_TYPE] = {
+      code: CRITERION_CODES.TRANSACTION_TYPE,
+      name: 'Transaction Type',
+      isStrong: false,
+      evaluated: bankTypes.length > 0 && glTypes.length > 0,
+      satisfied: typeMatched,
+      score: typeMatched ? 1.0 : 0,
+      reason: typeMatched ? 'Transaction types compatible across group' : 'Transaction type incompatibility in group',
+      details: { bankTypes, glTypes },
+    };
+
+    // 7. CURRENCY (Additional)
+    const bankCurrs = Array.from(new Set(bankTxs.map((b) => (b.currency || '').toUpperCase().trim()).filter(Boolean)));
+    const glCurrs = Array.from(new Set(glTxs.map((g) => (g.currency || '').toUpperCase().trim()).filter(Boolean)));
+    const currencyMatched =
+      bankCurrs.length === 1 && glCurrs.length === 1 && bankCurrs[0] === glCurrs[0];
+
+    breakdown[CRITERION_CODES.CURRENCY] = {
+      code: CRITERION_CODES.CURRENCY,
+      name: 'Currency',
+      isStrong: false,
+      evaluated: bankCurrs.length > 0 && glCurrs.length > 0,
+      satisfied: currencyMatched,
+      score: currencyMatched ? 1.0 : 0,
+      reason: currencyMatched ? `Currency match (${bankCurrs[0]})` : 'Currency discrepancy across transactions in group',
+      details: { bankCurrs, glCurrs },
+    };
+
+    // 8. NARRATION (Additional)
+    let maxNarrationSim = 0;
+    for (const b of bankTxs) {
+      const bText = b.narration || b.description || '';
+      for (const g of glTxs) {
+        const gText = g.narration || '';
+        const sim = calculateStringSimilarity(bText, gText);
+        if (sim > maxNarrationSim) maxNarrationSim = sim;
+      }
+    }
+    const narrationMatched = maxNarrationSim >= narrationThreshold;
+
+    breakdown[CRITERION_CODES.NARRATION] = {
+      code: CRITERION_CODES.NARRATION,
+      name: 'Narration / Description',
+      isStrong: false,
+      evaluated: bankTxs.some((b) => b.narration || b.description) && glTxs.some((g) => g.narration),
+      satisfied: narrationMatched,
+      score: narrationMatched ? maxNarrationSim : 0,
+      reason: narrationMatched
+        ? `Description similarity in group (${(maxNarrationSim * 100).toFixed(1)}% >= ${(narrationThreshold * 100).toFixed(0)}%)`
+        : `Description dissimilarity in group (${(maxNarrationSim * 100).toFixed(1)}% < ${(narrationThreshold * 100).toFixed(0)}%)`,
+      details: { maxSimilarity: maxNarrationSim, threshold: narrationThreshold },
+    };
+
+    // 9. CUSTOMER_SUPPLIER (Additional)
+    let maxPartySim = 0;
+    for (const b of bankTxs) {
+      const bText = b.narration || b.description || '';
+      for (const g of glTxs) {
+        const gParty = g.customerSupplier || '';
+        if (gParty && bText) {
+          const sim = calculateStringSimilarity(bText, gParty);
+          if (sim > maxPartySim) maxPartySim = sim;
+        }
+      }
+    }
+    const partyMatched = maxPartySim >= counterpartyThreshold;
+
+    breakdown[CRITERION_CODES.CUSTOMER_SUPPLIER] = {
+      code: CRITERION_CODES.CUSTOMER_SUPPLIER,
+      name: 'Customer / Supplier Name',
+      isStrong: false,
+      evaluated: bankTxs.some((b) => b.narration || b.description) && glTxs.some((g) => g.customerSupplier),
+      satisfied: partyMatched,
+      score: partyMatched ? maxPartySim : 0,
+      reason: partyMatched
+        ? `Counterparty similarity in group (${(maxPartySim * 100).toFixed(1)}% >= ${(counterpartyThreshold * 100).toFixed(0)}%)`
+        : 'Counterparty dissimilarity in group',
+      details: { maxSimilarity: maxPartySim, threshold: counterpartyThreshold },
+    };
+
+    // Aggregations
+    const allResults = Object.values(breakdown);
+    const evaluatedList = allResults.filter((r) => r.evaluated).map((r) => r.code);
+    const satisfiedList = allResults.filter((r) => r.satisfied).map((r) => r.code);
+    const failedList = allResults.filter((r) => r.evaluated && !r.satisfied).map((r) => r.code);
+    const strongSatisfiedList = satisfiedList.filter((code) => STRONG_CRITERIA.includes(code));
+
+    const totalSatisfied = satisfiedList.length;
+    const strongSatisfied = strongSatisfiedList.length;
+
+    const eligible = organizationIsolated && totalSatisfied >= minTotal && strongSatisfied >= minStrong;
+
+    const strongMetCount = strongSatisfiedList.length;
+    const additionalMetCount = totalSatisfied - strongMetCount;
+    const strongWeight = Math.min(1.0, strongMetCount / 2);
+    const totalWeight = Math.min(1.0, totalSatisfied / 4);
+
+    const confidenceScore = eligible
+      ? Math.min(1.0, Math.max(0.65, 0.50 + strongWeight * 0.30 + totalWeight * 0.20))
+      : Math.min(0.49, strongMetCount * 0.15 + additionalMetCount * 0.08);
 
     return {
       eligible,

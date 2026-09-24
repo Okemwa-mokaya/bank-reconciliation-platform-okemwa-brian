@@ -4,6 +4,11 @@ import { requirePermission } from '../middleware/rbac';
 import { CreateReconciliationPeriodSchema, SubmitApprovalSchema } from '../validators/schemas';
 import { recordAuditEvent } from '../services/auditService';
 import { Prisma } from '@prisma/client';
+import {
+  CriteriaEvaluationService,
+  EvaluationSummary,
+} from '../services/matching/criteriaEvaluator';
+import { ToleranceResolverService } from '../services/matching/toleranceResolver';
 
 export const reconciliationRouter = Router();
 
@@ -444,7 +449,59 @@ export const createMatchHandler = async (req: any, res: any) => {
       }
     }
 
-    // 5. Create Match Record with multi-transaction junction entries & allocation integrity
+    // 5. TOLERANCE RESOLUTION & CRITERIA EVALUATION ENGINE INTEGRATION
+    const resolvedTolerances = await ToleranceResolverService.resolveForContext({
+      organizationId: orgId,
+      bankAccountId: period.bankAccountId,
+      matchingRuleId: matchingRuleId || null,
+    });
+
+    let evaluationSummary: EvaluationSummary | null = null;
+    if (bankTxs.length > 0 && glTxs.length > 0) {
+      evaluationSummary = CriteriaEvaluationService.evaluateGroup(bankTxs, glTxs, {
+        tolerances: resolvedTolerances,
+      });
+    }
+
+    const isProposedMatch =
+      req.body.matchStatus === 'PROPOSED' ||
+      req.body.isProposed === true ||
+      req.body.status === 'PROPOSED' ||
+      req.body.proposed === true;
+
+    // Enforce matching eligibility for proposed matches:
+    // A proposed match cannot be created merely because the client supplies confidenceScore,
+    // criteriaMatched, tolerancesApplied, or explanation. It MUST be proven eligible by the server's criteria engine.
+    if (isProposedMatch) {
+      if (!evaluationSummary || !evaluationSummary.eligible) {
+        return res.status(400).json({
+          error: 'Proposed match rejected: transactions do not satisfy matching criteria eligibility threshold (at least 3 criteria satisfied with at least 2 strong criteria)',
+          totalCriteriaSatisfied: evaluationSummary?.totalCriteriaSatisfied ?? 0,
+          strongCriteriaSatisfied: evaluationSummary?.strongCriteriaSatisfied ?? 0,
+          criteriaSatisfied: evaluationSummary?.criteriaSatisfied ?? [],
+          criteriaFailed: evaluationSummary?.criteriaFailed ?? [],
+          breakdown: evaluationSummary?.breakdown,
+        });
+      }
+    }
+
+    // Determine target match attributes from server-evaluated criteria (client-supplied values are not trusted)
+    const targetMatchStatus = isProposedMatch ? 'PROPOSED' : 'CONFIRMED';
+    const targetCreatedByType = isProposedMatch ? 'SYSTEM' : 'USER';
+    const evaluatedConfidence = evaluationSummary
+      ? new Prisma.Decimal(evaluationSummary.confidenceScore)
+      : (matchType === 'ADJUSTMENT' ? new Prisma.Decimal(1.0) : new Prisma.Decimal(1.0));
+    const evaluatedCriteria = evaluationSummary
+      ? JSON.stringify(evaluationSummary.criteriaSatisfied)
+      : JSON.stringify([]);
+    const evaluatedTolerances = evaluationSummary
+      ? JSON.stringify(evaluationSummary.resolvedTolerances)
+      : (resolvedTolerances ? JSON.stringify(resolvedTolerances) : null);
+    const computedExplanation = evaluationSummary
+      ? `${targetMatchStatus === 'PROPOSED' ? 'Proposed' : 'Confirmed'} match based on ${evaluationSummary.totalCriteriaSatisfied} criteria (${evaluationSummary.strongCriteriaSatisfied} strong): ${evaluationSummary.criteriaSatisfied.join(', ')}`
+      : (req.body.explanation || (matchType === 'ADJUSTMENT' ? 'Manual adjustment match' : 'Manual match group created by user'));
+
+    // 6. Create Match Record with multi-transaction junction entries & allocation integrity
     const match = await prisma.$transaction(async (tx) => {
       // A. Pre-calculate bank allocations and validate availability before any writes
       const preparedBankMatches: Array<{
@@ -556,13 +613,13 @@ export const createMatchHandler = async (req: any, res: any) => {
         data: {
           reconciliationPeriodId: periodId,
           matchType,
-          matchStatus: 'CONFIRMED',
+          matchStatus: targetMatchStatus,
           matchingRuleId: matchingRuleId || null,
-          confidenceScore: new Prisma.Decimal(confidenceScore),
-          criteriaMatched: JSON.stringify(criteriaMatched),
-          tolerancesApplied: tolerancesApplied ? JSON.stringify(tolerancesApplied) : null,
-          explanation,
-          createdByType: 'USER',
+          confidenceScore: evaluatedConfidence,
+          criteriaMatched: evaluatedCriteria,
+          tolerancesApplied: evaluatedTolerances,
+          explanation: computedExplanation,
+          createdByType: targetCreatedByType,
           createdById: req.user?.id,
         },
       });
@@ -638,7 +695,7 @@ export const createMatchHandler = async (req: any, res: any) => {
         bankTransactionsCount: bankTransactionIds.length,
         glTransactionsCount: glTransactionIds.length,
       },
-      reason: explanation,
+      reason: computedExplanation,
     });
 
     const fullMatch = await prisma.reconciliationMatch.findUnique({
@@ -649,7 +706,7 @@ export const createMatchHandler = async (req: any, res: any) => {
       },
     });
 
-    res.status(201).json({ match: fullMatch });
+    res.status(201).json({ match: fullMatch, evaluation: evaluationSummary });
   } catch (error: any) {
     if (
       error.message &&
