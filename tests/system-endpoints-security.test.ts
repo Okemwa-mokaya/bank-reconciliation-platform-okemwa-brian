@@ -41,7 +41,7 @@ describe('System Endpoints Security Hardening', () => {
     auditorToken = await createSession('auditor-usr-1');
 
     // 3. Mock prisma.user.findUnique to return realistic user roles for these sessions
-    vi.spyOn(prisma.user, 'findUnique').mockImplementation(async (args: any) => {
+    vi.spyOn(prisma.user, 'findUnique').mockImplementation((async (args: any) => {
       const id = args.where.id;
       if (id === 'admin-usr-1') {
         return {
@@ -98,7 +98,7 @@ describe('System Endpoints Security Hardening', () => {
         } as any;
       }
       return null;
-    });
+    }) as any);
   });
 
   afterAll(async () => {

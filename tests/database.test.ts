@@ -8,15 +8,16 @@ describe('Database Foundation & Entity Relationships', () => {
 
   beforeAll(async () => {
     const conn = await checkDatabaseConnection();
-    isDbOnline = conn.ok;
-    if (isDbOnline) {
-      await seedDatabase();
+    if (!conn.ok) {
+      throw new Error(`Integration test requires live PostgreSQL connection: ${conn.message}`);
     }
+    isDbOnline = true;
+    await seedDatabase();
   });
 
   it('1. Connects to database successfully or returns connection diagnostics', async () => {
     const status = await checkDatabaseConnection();
-    expect(typeof status.ok).toBe('boolean');
+    expect(status.ok).toBe(true);
     expect(typeof status.message).toBe('string');
   });
 
@@ -45,80 +46,68 @@ describe('Database Foundation & Entity Relationships', () => {
   });
 
   it('4. Enforces Organization entity and unique slug constraint', async () => {
-    if (isDbOnline) {
-      const org = await prisma.organization.findUnique({
-        where: { slug: 'acme-treasury' },
-      });
-      expect(org).not.toBeNull();
-      expect(org?.name).toBe('Acme Global Treasury Corp');
-      expect(org?.baseCurrency).toBe('USD');
-    } else {
-      expect(true).toBe(true);
-    }
+    const org = await prisma.organization.findUnique({
+      where: { slug: 'acme-treasury' },
+    });
+    expect(org).not.toBeNull();
+    expect(org?.name).toBe('Acme Global Treasury Corp');
+    expect(org?.baseCurrency).toBe('USD');
   });
 
   it('5. Creates Bank and Bank Accounts with referential integrity', async () => {
-    if (isDbOnline) {
-      const org = await prisma.organization.findUnique({ where: { slug: 'acme-treasury' } });
-      expect(org).not.toBeNull();
+    const org = await prisma.organization.findUnique({ where: { slug: 'acme-treasury' } });
+    expect(org).not.toBeNull();
 
-      const accounts = await prisma.bankAccount.findMany({
-        where: { organizationId: org!.id },
-        include: { bank: true },
-      });
+    const accounts = await prisma.bankAccount.findMany({
+      where: { organizationId: org!.id },
+      include: { bank: true },
+    });
 
-      expect(accounts.length).toBeGreaterThanOrEqual(3);
-      const opChecking = accounts.find((a) => a.accountNumber === 'CHASE-OP-8921');
-      expect(opChecking).toBeDefined();
-      expect(opChecking?.accountType).toBe('OPERATING');
-    } else {
-      expect(true).toBe(true);
-    }
+    expect(accounts.length).toBeGreaterThanOrEqual(3);
+    const opChecking = accounts.find((a) => a.accountNumber === 'CHASE-OP-8921');
+    expect(opChecking).toBeDefined();
+    expect(opChecking?.accountType).toBe('OPERATING');
   });
 
   it('6. Creates Bank Statement and Statement Pages structure', async () => {
-    if (isDbOnline) {
-      const org = await prisma.organization.findUnique({ where: { slug: 'acme-treasury' } });
-      const user = await prisma.user.findFirst({ where: { organizationId: org!.id } });
-      const account = await prisma.bankAccount.findFirst({ where: { organizationId: org!.id } });
+    const org = await prisma.organization.findUnique({ where: { slug: 'acme-treasury' } });
+    const user = await prisma.user.findFirst({ where: { organizationId: org!.id } });
+    const account = await prisma.bankAccount.findFirst({ where: { organizationId: org!.id } });
 
-      const statement = await prisma.bankStatement.create({
-        data: {
-          organizationId: org!.id,
-          bankAccountId: account!.id,
-          statementPeriodStart: new Date('2026-08-01'),
-          statementPeriodEnd: new Date('2026-08-31'),
-          originalFilename: 'CHASE_AUG_2026_STATEMENT.pdf',
-          fileType: 'PDF',
-          storagePath: '/secure-vault/statements/CHASE_AUG_2026.pdf',
-          uploadedById: user!.id,
-          processingStatus: 'PENDING',
-          extractionStatus: 'NOT_STARTED',
-          validationStatus: 'PENDING',
-          duplicateStatus: 'UNIQUE',
-          openingBalance: 1250000.0,
-          closingBalance: 1420500.0,
-          totalCredits: 250000.0,
-          totalDebits: 79500.0,
-          transactionCount: 2,
-          pages: {
-            create: [
-              {
-                pageNumber: 1,
-                extractionStatus: 'NOT_STARTED',
-                ocrStatus: 'NOT_STARTED',
-              },
-            ],
-          },
+    const statement = await prisma.bankStatement.create({
+      data: {
+        organizationId: org!.id,
+        bankAccountId: account!.id,
+        statementPeriodStart: new Date('2026-08-01'),
+        statementPeriodEnd: new Date('2026-08-31'),
+        originalFilename: `CHASE_AUG_2026_${Date.now()}.pdf`,
+        fileType: 'PDF',
+        storagePath: `/secure-vault/statements/CHASE_AUG_2026_${Date.now()}.pdf`,
+        uploadedById: user!.id,
+        processingStatus: 'PENDING',
+        extractionStatus: 'NOT_STARTED',
+        validationStatus: 'PENDING',
+        duplicateStatus: 'UNIQUE',
+        openingBalance: 1250000.0,
+        closingBalance: 1420500.0,
+        totalCredits: 250000.0,
+        totalDebits: 79500.0,
+        transactionCount: 2,
+        pages: {
+          create: [
+            {
+              pageNumber: 1,
+              extractionStatus: 'NOT_STARTED',
+              ocrStatus: 'NOT_STARTED',
+            },
+          ],
         },
-        include: { pages: true },
-      });
+      },
+      include: { pages: true },
+    });
 
-      expect(statement.id).toBeDefined();
-      expect(statement.pages.length).toBe(1);
-    } else {
-      expect(true).toBe(true);
-    }
+    expect(statement.id).toBeDefined();
+    expect(statement.pages.length).toBe(1);
   });
 
   it('7. Dual Transaction Ingestion and fingerprinting support', async () => {

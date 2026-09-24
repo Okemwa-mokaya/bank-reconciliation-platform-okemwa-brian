@@ -1,0 +1,5 @@
+Date,Description,Reference,Debit,Credit,Balance
+2026-03-01,Client Wire Inflow,REF-WI-1790086180928,,12500.00,12500.00
+2026-03-02,Office Lease Payment,REF-LP-1790086180928,3200.00,,9300.00
+2026-03-03,Cloud Infrastructure,REF-AWS-1790086180928,450.50,,8849.50
+INVALID_DATE,Corrupted Row without Date,REF-BAD,100.00,,8749.50

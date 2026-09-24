@@ -69,7 +69,7 @@ Important:
 - Return ONLY the JSON object without markdown formatting.`;
 
   try {
-    const response = await ai.models.generateContent({
+    const generatePromise = ai.models.generateContent({
       model: 'gemini-3.8-flash',
       contents: [
         {
@@ -88,6 +88,12 @@ Important:
         },
       ],
     });
+
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('AI OCR request timed out after 12 seconds')), 12000)
+    );
+
+    const response = await Promise.race([generatePromise, timeoutPromise]);
 
     const responseText = response.text || '';
     const cleanJson = responseText.replace(/```json\s*|\s*```/g, '').trim();

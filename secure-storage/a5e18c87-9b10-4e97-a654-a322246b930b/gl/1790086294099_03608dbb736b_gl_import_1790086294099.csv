@@ -1,0 +1,4 @@
+Posting Date,Journal,Account,Description,Debit,Credit,Supplier
+2026-03-01,JRN-101-1790086294099,1010-CASH,Client Inflow Wire 1790086294099,,15000.00,Alpha Corp
+2026-03-02,JRN-102-1790086294099,5020-RENT,Facility Lease Expense 1790086294099,3200.00,,Metropolis Properties
+2026-03-03,JRN-103-1790086294099,6010-SAAS,Hosting Subscription 1790086294099,450.50,,Amazon Web Services

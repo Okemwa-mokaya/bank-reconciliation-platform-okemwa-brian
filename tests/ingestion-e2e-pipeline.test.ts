@@ -11,30 +11,31 @@ describe('Phase 2 End-to-End Ingestion Pipeline (PostgreSQL Integration)', () =>
 
   beforeAll(async () => {
     const conn = await checkDatabaseConnection();
-    isDbOnline = conn.ok;
-    if (isDbOnline) {
-      await seedDatabase();
-
-      // Retrieve seeded organization, account, and user
-      const org = await prisma.organization.findUnique({
-        where: { slug: 'acme-treasury' },
-        include: {
-          bankAccounts: true,
-          users: true,
-        },
-      });
-
-      if (org && org.bankAccounts.length > 0 && org.users.length > 0) {
-        testOrgId = org.id;
-        testBankAccountId = org.bankAccounts[0].id;
-        testUserId = org.users[0].id;
-      }
+    if (!conn.ok) {
+      throw new Error(`Integration test requires live PostgreSQL connection: ${conn.message}`);
     }
+    isDbOnline = true;
+    await seedDatabase();
+
+    // Retrieve seeded organization, account, and user
+    const org = await prisma.organization.findUnique({
+      where: { slug: 'acme-treasury' },
+      include: {
+        bankAccounts: true,
+        users: true,
+      },
+    });
+
+    if (!org || org.bankAccounts.length === 0 || org.users.length === 0) {
+      throw new Error('Test organization or related accounts could not be seeded in PostgreSQL');
+    }
+
+    testOrgId = org.id;
+    testBankAccountId = org.bankAccounts[0].id;
+    testUserId = org.users[0].id;
   });
 
   it('1. Successfully ingests a Bank Statement CSV with audit trail, checksums, and UNMATCHED status', async () => {
-    if (!isDbOnline || !testOrgId) return;
-
     const uniqueNonce = Date.now();
     const csvContent = `Date,Description,Reference,Debit,Credit,Balance
 2026-03-01,Client Wire Inflow,REF-WI-${uniqueNonce},,12500.00,12500.00
@@ -85,7 +86,7 @@ INVALID_DATE,Corrupted Row without Date,REF-BAD,100.00,,8749.50`;
     // 4. Verify RejectedRow in database
     expect(statement?.rejectedRows.length).toBe(1);
     expect(statement?.rejectedRows[0].errorCode).toBe('INVALID_DATE');
-    expect(statement?.rejectedRows[0].rowNumber).toBe(5);
+    expect(statement?.rejectedRows[0].rowNumber).toBe(4);
 
     // 5. Verify AuditEvent created
     const audit = await prisma.auditEvent.findFirst({
@@ -99,8 +100,6 @@ INVALID_DATE,Corrupted Row without Date,REF-BAD,100.00,,8749.50`;
   });
 
   it('2. Level 1 Duplicate Detection: Rejects exact re-upload of identical file hash', async () => {
-    if (!isDbOnline || !testOrgId) return;
-
     const uniqueNonce = Date.now();
     const csvContent = `Date,Description,Reference,Debit,Credit
 2026-03-05,Vendor Payment,REF-VD-${uniqueNonce},890.00,`;
@@ -145,13 +144,11 @@ INVALID_DATE,Corrupted Row without Date,REF-BAD,100.00,,8749.50`;
   });
 
   it('3. Successfully ingests General Ledger (GL) CSV with UNMATCHED status and metadata preservation', async () => {
-    if (!isDbOnline || !testOrgId) return;
-
     const uniqueNonce = Date.now();
     const glCsv = `Posting Date,Journal,Account,Description,Debit,Credit,Supplier
-2026-03-01,JRN-101,1010-CASH,Client Inflow Wire,,15000.00,Alpha Corp
-2026-03-02,JRN-102,5020-RENT,Facility Lease Expense,3200.00,,Metropolis Properties
-2026-03-03,JRN-103,6010-SAAS,Hosting Subscription,450.50,,Amazon Web Services`;
+2026-03-01,JRN-101-${uniqueNonce},1010-CASH,Client Inflow Wire ${uniqueNonce},,15000.00,Alpha Corp
+2026-03-02,JRN-102-${uniqueNonce},5020-RENT,Facility Lease Expense ${uniqueNonce},3200.00,,Metropolis Properties
+2026-03-03,JRN-103-${uniqueNonce},6010-SAAS,Hosting Subscription ${uniqueNonce},450.50,,Amazon Web Services`;
 
     const fileBuffer = Buffer.from(glCsv, 'utf-8');
     const filename = `gl_import_${uniqueNonce}.csv`;
@@ -188,8 +185,6 @@ INVALID_DATE,Corrupted Row without Date,REF-BAD,100.00,,8749.50`;
   });
 
   it('4. Level 2 Duplicate Detection: Identifies potential duplicate transactions across batches without deleting', async () => {
-    if (!isDbOnline || !testOrgId) return;
-
     const uniqueNonce = Date.now();
     // Batch 1 with transaction A
     const csv1 = `Date,Description,Reference,Debit,Credit

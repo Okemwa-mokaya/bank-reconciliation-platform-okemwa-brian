@@ -1,4 +1,7 @@
 import { PrismaClient } from '@prisma/client';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 declare global {
   // eslint-disable-next-line no-var
