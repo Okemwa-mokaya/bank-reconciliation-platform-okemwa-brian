@@ -17,6 +17,7 @@ import {
   Sliders,
 } from 'lucide-react';
 import { BankAccount } from '../types';
+import { authenticatedFetch } from '../services/api';
 
 interface DataIngestionModalProps {
   isOpen: boolean;
@@ -134,7 +135,7 @@ export const DataIngestionModal: React.FC<DataIngestionModalProps> = ({
       ingestionType === 'BANK_STATEMENT' ? '/api/statements/preview' : '/api/transactions/gl/preview';
 
     try {
-      const res = await fetch(endpoint, {
+      const res = await authenticatedFetch(endpoint, {
         method: 'POST',
         body: formData,
       });
@@ -181,7 +182,7 @@ export const DataIngestionModal: React.FC<DataIngestionModalProps> = ({
       ingestionType === 'BANK_STATEMENT' ? '/api/statements/upload' : '/api/transactions/gl/upload';
 
     try {
-      const res = await fetch(endpoint, {
+      const res = await authenticatedFetch(endpoint, {
         method: 'POST',
         body: formData,
       });

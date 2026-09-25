@@ -50,11 +50,41 @@ let currentSession: AuthSession | null = null;
 let sessionListeners: Array<(session: AuthSession | null) => void> = [];
 
 export function getAuthToken(): string | null {
-  return currentSession?.token || localStorage.getItem(STORAGE_TOKEN_KEY);
+  if (currentSession?.token) {
+    return currentSession.token;
+  }
+  if (typeof localStorage !== 'undefined') {
+    try {
+      return localStorage.getItem(STORAGE_TOKEN_KEY);
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
 
 export function getCurrentSession(): AuthSession | null {
   return currentSession;
+}
+
+export function setAuthSession(session: AuthSession | null) {
+  currentSession = session;
+  if (typeof localStorage !== 'undefined') {
+    try {
+      if (session?.token) {
+        localStorage.setItem(STORAGE_TOKEN_KEY, session.token);
+        if (session.user?.email) {
+          localStorage.setItem(STORAGE_EMAIL_KEY, session.user.email);
+        }
+      } else {
+        localStorage.removeItem(STORAGE_TOKEN_KEY);
+        localStorage.removeItem(STORAGE_EMAIL_KEY);
+      }
+    } catch {
+      // Ignore storage errors in restricted runtimes
+    }
+  }
+  notifySessionListeners();
 }
 
 export function subscribeToSession(callback: (session: AuthSession | null) => void) {
@@ -68,6 +98,27 @@ function notifySessionListeners() {
   for (const listener of sessionListeners) {
     listener(currentSession);
   }
+}
+
+/**
+ * Shared authenticated fetch helper.
+ * Automatically attaches the active user's Authorization: Bearer <token> header.
+ * Does not overwrite or set Content-Type so that multipart/form-data boundary generation is preserved.
+ */
+export async function authenticatedFetch(
+  endpoint: string,
+  options: RequestInit = {}
+): Promise<Response> {
+  const token = getAuthToken();
+  const headers = new Headers(options.headers || {});
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+
+  return fetch(endpoint, {
+    ...options,
+    headers,
+  });
 }
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
@@ -202,9 +253,18 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
-  // Statements
+  // Statements & Ingestion
+  authenticatedFetch,
   getStatements: () => request<{ statements: BankStatement[] }>('/api/statements'),
   getStatementDetails: (id: string) => request<{ statement: BankStatement }>(`/api/statements/${id}`),
+  previewStatement: (formData: FormData) =>
+    authenticatedFetch('/api/statements/preview', { method: 'POST', body: formData }),
+  uploadStatement: (formData: FormData) =>
+    authenticatedFetch('/api/statements/upload', { method: 'POST', body: formData }),
+  previewGL: (formData: FormData) =>
+    authenticatedFetch('/api/transactions/gl/preview', { method: 'POST', body: formData }),
+  uploadGL: (formData: FormData) =>
+    authenticatedFetch('/api/transactions/gl/upload', { method: 'POST', body: formData }),
 
   // Transactions
   getBankTransactions: (params?: { bankAccountId?: string; status?: string }) => {
