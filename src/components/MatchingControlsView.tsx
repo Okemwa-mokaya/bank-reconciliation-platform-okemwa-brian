@@ -61,7 +61,7 @@ export const MatchingControlsView: React.FC<MatchingControlsViewProps> = ({
             </p>
           </div>
           <span className="inline-flex items-center px-2.5 py-1 rounded-md text-[11px] font-semibold bg-stone-100 text-stone-800 border border-stone-300">
-            Phase 1 Foundation: Criteria, Controls & Manual Matching Active • Auto-Engine Scheduled for Phase 3
+            Matching Engine Active • Server-side criteria evaluation and tolerance resolution enabled
           </span>
         </div>
       </div>
