@@ -283,7 +283,7 @@ export const MatchingControlsView: React.FC<MatchingControlsViewProps> = ({
                   <span className="text-stone-500">Amount Tolerance:</span>
                   <p className="font-mono font-bold text-stone-900">
                     {tol.amountToleranceType === 'FIXED'
-                      ? `$${tol.amountToleranceValue.toFixed(2)}`
+                      ? `$${Number(tol.amountToleranceValue).toFixed(2)}`
                       : `${tol.amountToleranceValue}%`}
                   </p>
                 </div>
