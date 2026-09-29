@@ -1188,6 +1188,14 @@ export const confirmMatchHandler = async (req: any, res: any) => {
       });
     }
 
+    // Confirmation is a forward-only action: only proposed matches may be confirmed.
+    // Already-confirmed matches are treated as idempotent re-confirmations.
+    if (match.matchStatus !== 'PROPOSED' && match.matchStatus !== 'CONFIRMED') {
+      return res.status(400).json({
+        error: `Cannot confirm reconciliation match from status ${match.matchStatus}. Only PROPOSED matches can be confirmed.`,
+      });
+    }
+
     const wasAlreadyConfirmed = match.matchStatus === 'CONFIRMED';
 
     const updated = await prisma.$transaction(async (tx) => {
