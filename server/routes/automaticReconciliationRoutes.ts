@@ -413,13 +413,77 @@ automaticReconciliationRouter.post('/matches/:id/reverse', requirePermission('ma
   if (match.matchStatus !== 'CONFIRMED') return res.status(409).json({ error: `Only CONFIRMED matches can be reversed; current status is ${match.matchStatus}` });
 
   await prisma.$transaction(async (tx) => {
+    // Recalculate transaction status from the remaining CONFIRMED allocations.
+    // Reversing one match must not erase other confirmed allocations.
     for (const item of match.bankTransactions) {
-      await tx.bankTransaction.update({ where: { id: item.bankTransactionId }, data: { status: 'UNMATCHED' } });
+      const bankTx = await tx.bankTransaction.findUnique({
+        where: { id: item.bankTransactionId },
+      });
+      if (!bankTx) continue;
+
+      const allocations = await tx.bankTransactionMatch.aggregate({
+        where: {
+          bankTransactionId: item.bankTransactionId,
+          match: {
+            matchStatus: 'CONFIRMED',
+            id: { not: match.id },
+          },
+        },
+        _sum: { allocatedAmount: true },
+      });
+
+      const allocated = allocations._sum.allocatedAmount || new Prisma.Decimal(0);
+      const amount = new Prisma.Decimal(bankTx.signedAmount).abs();
+      const status = allocated.isZero()
+        ? 'UNMATCHED'
+        : allocated.lt(amount)
+          ? 'PARTIALLY_MATCHED'
+          : 'MATCHED';
+
+      await tx.bankTransaction.update({
+        where: { id: item.bankTransactionId },
+        data: { status },
+      });
     }
+
     for (const item of match.glTransactions) {
-      await tx.glTransaction.update({ where: { id: item.glTransactionId }, data: { status: 'UNMATCHED' } });
+      const glTx = await tx.glTransaction.findUnique({
+        where: { id: item.glTransactionId },
+      });
+      if (!glTx) continue;
+
+      const allocations = await tx.glTransactionMatch.aggregate({
+        where: {
+          glTransactionId: item.glTransactionId,
+          match: {
+            matchStatus: 'CONFIRMED',
+            id: { not: match.id },
+          },
+        },
+        _sum: { allocatedAmount: true },
+      });
+
+      const allocated = allocations._sum.allocatedAmount || new Prisma.Decimal(0);
+      const amount = new Prisma.Decimal(glTx.amount).abs();
+      const status = allocated.isZero()
+        ? 'UNMATCHED'
+        : allocated.lt(amount)
+          ? 'PARTIALLY_MATCHED'
+          : 'MATCHED';
+
+      await tx.glTransaction.update({
+        where: { id: item.glTransactionId },
+        data: { status },
+      });
     }
-    await tx.reconciliationMatch.update({ where: { id: match.id }, data: { matchStatus: 'REVERSED', explanation: `${match.explanation || ''} [REVERSED: ${reason}]` } });
+
+    await tx.reconciliationMatch.update({
+      where: { id: match.id },
+      data: {
+        matchStatus: 'REVERSED',
+        explanation: `${match.explanation || ''} [REVERSED: ${reason}]`,
+      },
+    });
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, maxWait: 5000, timeout: 10000 });
 
   await audit(req, orgId, 'MATCH_REVERSED', match.id, { matchStatus: 'CONFIRMED' }, { matchStatus: 'REVERSED', reason }, reason);
