@@ -281,6 +281,15 @@ export const api = {
     const q = new URLSearchParams(params as any).toString();
     return request<{ periods: ReconciliationPeriod[] }>(`/api/reconciliations/periods${q ? `?${q}` : ''}`);
   },
+  createReconciliationPeriod: (data: {
+    bankAccountId: string;
+    periodStart: string;
+    periodEnd: string;
+  }) =>
+    request<{ period: ReconciliationPeriod }>('/api/reconciliations/periods', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
   getPeriodMatches: (periodId: string) =>
     request<{ matches: ReconciliationMatch[] }>(`/api/reconciliations/periods/${periodId}/matches`),
   proposeAutoMatches: (periodId: string) =>
