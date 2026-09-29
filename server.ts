@@ -6,6 +6,7 @@ import { prisma, checkDatabaseConnection } from './server/db';
 import { seedDatabase } from './server/seed';
 import { authMiddleware } from './server/middleware/auth';
 import { enforceOrganizationScope } from './server/middleware/organizationIsolation';
+import { requireOverridePermission } from './server/middleware/reconciliationSecurity';
 
 import { systemRouter } from './server/routes/systemRoutes';
 import { authRouter } from './server/routes/authRoutes';
@@ -29,7 +30,6 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 app.use('/api/system', authMiddleware, systemRouter);
-
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
@@ -38,8 +38,13 @@ app.use('/api/auth', authMiddleware, authRouter);
 app.use('/api/bank-structure', authMiddleware, enforceOrganizationScope, bankRouter);
 app.use('/api/statements', authMiddleware, enforceOrganizationScope, statementRouter);
 app.use('/api/transactions', authMiddleware, enforceOrganizationScope, transactionRouter);
+
+// Hardened Phase 3 routes are registered before the legacy reconciliation
+// router so the corrected lifecycle takes precedence for matching proposals,
+// review, approval, confirmation, rejection and reversal.
+app.use('/api/reconciliations', authMiddleware, enforceOrganizationScope, requireOverridePermission, automaticReconciliationRouter);
 app.use('/api/reconciliations', authMiddleware, enforceOrganizationScope, reconciliationRouter);
-app.use('/api/reconciliations', authMiddleware, enforceOrganizationScope, automaticReconciliationRouter);
+
 app.use('/api/matching', authMiddleware, enforceOrganizationScope, matchingRouter);
 app.use('/api/exceptions', authMiddleware, enforceOrganizationScope, exceptionRouter);
 app.use('/api/aging', authMiddleware, enforceOrganizationScope, agingRouter);
@@ -68,17 +73,12 @@ async function startServer() {
   }
 
   if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
+    const vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+    app.get('*', (req, res) => res.sendFile(path.join(distPath, 'index.html')));
   }
 
   app.listen(PORT, '0.0.0.0', () => {
