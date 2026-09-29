@@ -781,12 +781,23 @@ export const unmatchHandler = async (req: any, res: any) => {
       include: { reconciliationPeriod: true },
     });
 
-    if (!initialMatch || initialMatch.reconciliationPeriod.organizationId !== orgId) {
+    if (!initialMatch) {
+      return res.status(404).json({ error: 'Reconciliation match not found' });
+    }
+
+    // Direct handler tests and some internal callers may provide a lightweight
+    // match record without the included period. Resolve the period explicitly
+    // in that case while preserving organization isolation.
+    const period = initialMatch.reconciliationPeriod ||
+      await prisma.reconciliationPeriod.findFirst({
+        where: { id: initialMatch.reconciliationPeriodId, organizationId: orgId },
+      });
+
+    if (!period || period.organizationId !== orgId) {
       return res.status(404).json({ error: 'Reconciliation match not found' });
     }
 
     const periodId = initialMatch.reconciliationPeriodId;
-    const period = initialMatch.reconciliationPeriod;
 
     if (period.isLocked || period.status === 'CLOSED') {
       return res.status(403).json({ error: 'Cannot unmatch on a locked or closed reconciliation period' });
