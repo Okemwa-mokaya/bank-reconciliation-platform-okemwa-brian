@@ -8,6 +8,16 @@ import { Request, Response, NextFunction } from 'express';
 export function requireOverridePermission(req: Request, res: Response, next: NextFunction) {
   const body: any = req.body || {};
   const requestedOverride = body.overrideReason != null || body.override === true || body.isManualOverride === true;
+  const requestedProposal = body.matchStatus === 'PROPOSED' || body.status === 'PROPOSED' || body.isProposed === true || body.proposed === true;
+
+  // Legacy direct match creation must not be used to manufacture a proposal,
+  // because the old handler also committed transaction status changes. The
+  // dedicated automatic engine owns proposal creation and review lifecycle.
+  if (requestedProposal && req.method === 'POST' && req.path.includes('/matches')) {
+    return res.status(400).json({
+      error: 'Direct PROPOSED match creation is disabled. Use the automatic reconciliation proposal endpoint.',
+    });
+  }
 
   if (!requestedOverride) return next();
   if (!req.user) return res.status(401).json({ error: 'Unauthorized: Authentication required' });
