@@ -871,8 +871,17 @@ export const unmatchHandler = async (req: any, res: any) => {
         });
       }
 
-      // 4. Delete match record
-      await tx.reconciliationMatch.delete({ where: { id: matchId } });
+      // 4. Preserve the match record for audit/history.
+      // An unmatch reverses the active match but must not erase the reconciliation record.
+      await tx.reconciliationMatch.update({
+        where: { id: matchId },
+        data: {
+          matchStatus: 'UNMATCHED',
+          explanation: match.explanation
+            ? `${match.explanation} (Unmatched by ${req.user?.email || 'user'})`
+            : `Unmatched by ${req.user?.email || 'user'}`,
+        },
+      });
     });
 
     await recordAuditEvent({
