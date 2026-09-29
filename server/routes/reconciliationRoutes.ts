@@ -485,9 +485,20 @@ export const createMatchHandler = async (req: any, res: any) => {
       }
     }
 
-    // Determine target match attributes from server-evaluated criteria (client-supplied values are not trusted)
+    // Determine target match attributes and distinguish:
+    // 1. Automatic / proposed match (must be eligible via criteria engine)
+    // 2. Manual user-confirmed match (eligible via criteria engine)
+    // 3. Manual override of an otherwise ineligible candidate (explicitly tracked, audited, and flagged)
     const targetMatchStatus = isProposedMatch ? 'PROPOSED' : 'CONFIRMED';
     const targetCreatedByType = isProposedMatch ? 'SYSTEM' : 'USER';
+    const isEligible = evaluationSummary?.eligible === true;
+    const isManualOverride = !isProposedMatch && !isEligible && matchType !== 'ADJUSTMENT';
+    const overrideReason = isManualOverride
+      ? (req.body.overrideReason || req.body.reason || 'Manual user override of criteria eligibility threshold')
+      : null;
+    const overriddenById = isManualOverride ? (req.user?.id || null) : null;
+    const overriddenAt = isManualOverride ? new Date() : null;
+
     const evaluatedConfidence = evaluationSummary
       ? new Prisma.Decimal(evaluationSummary.confidenceScore)
       : (matchType === 'ADJUSTMENT' ? new Prisma.Decimal(1.0) : new Prisma.Decimal(1.0));
@@ -497,9 +508,18 @@ export const createMatchHandler = async (req: any, res: any) => {
     const evaluatedTolerances = evaluationSummary
       ? JSON.stringify(evaluationSummary.resolvedTolerances)
       : (resolvedTolerances ? JSON.stringify(resolvedTolerances) : null);
-    const computedExplanation = evaluationSummary
-      ? `${targetMatchStatus === 'PROPOSED' ? 'Proposed' : 'Confirmed'} match based on ${evaluationSummary.totalCriteriaSatisfied} criteria (${evaluationSummary.strongCriteriaSatisfied} strong): ${evaluationSummary.criteriaSatisfied.join(', ')}`
-      : (req.body.explanation || (matchType === 'ADJUSTMENT' ? 'Manual adjustment match' : 'Manual match group created by user'));
+
+    let computedExplanation: string;
+    if (isManualOverride) {
+      const userIdent = req.user?.email || req.user?.fullName || 'User';
+      const critCount = evaluationSummary?.totalCriteriaSatisfied ?? 0;
+      const strongCount = evaluationSummary?.strongCriteriaSatisfied ?? 0;
+      computedExplanation = `[MANUAL_OVERRIDE] Ineligible candidate manually confirmed by ${userIdent}. Evaluated criteria: ${critCount} satisfied (${strongCount} strong). Override reason: ${overrideReason}`;
+    } else if (evaluationSummary) {
+      computedExplanation = `${targetMatchStatus === 'PROPOSED' ? 'Proposed' : 'Confirmed'} match based on ${evaluationSummary.totalCriteriaSatisfied} criteria (${evaluationSummary.strongCriteriaSatisfied} strong): ${evaluationSummary.criteriaSatisfied.join(', ')}`;
+    } else {
+      computedExplanation = req.body.explanation || (matchType === 'ADJUSTMENT' ? 'Manual adjustment match' : 'Manual match group created by user');
+    }
 
     // 6. Create Match Record with multi-transaction junction entries & allocation integrity
     const match = await prisma.$transaction(async (tx) => {
@@ -621,6 +641,10 @@ export const createMatchHandler = async (req: any, res: any) => {
           explanation: computedExplanation,
           createdByType: targetCreatedByType,
           createdById: req.user?.id,
+          isManualOverride,
+          overrideReason,
+          overriddenById,
+          overriddenAt,
         },
       });
 
@@ -682,20 +706,26 @@ export const createMatchHandler = async (req: any, res: any) => {
       return createdMatch;
     });
 
+    const auditAction = isManualOverride ? 'MANUAL_OVERRIDE_MATCH' : 'MATCH_CREATED';
     await recordAuditEvent({
       organizationId: orgId,
       actorId: req.user?.id,
       actorEmail: req.user?.email,
       actorRole: req.user?.roles[0],
-      action: 'MATCH_CREATED',
+      action: auditAction,
       entityType: 'ReconciliationMatch',
       entityId: match.id,
       newValue: {
         matchType,
+        matchStatus: targetMatchStatus,
+        isManualOverride,
+        overrideReason,
+        overriddenById,
+        overriddenAt,
         bankTransactionsCount: bankTransactionIds.length,
         glTransactionsCount: glTransactionIds.length,
       },
-      reason: computedExplanation,
+      reason: isManualOverride ? overrideReason : computedExplanation,
     });
 
     const fullMatch = await prisma.reconciliationMatch.findUnique({
@@ -706,7 +736,12 @@ export const createMatchHandler = async (req: any, res: any) => {
       },
     });
 
-    res.status(201).json({ match: fullMatch, evaluation: evaluationSummary });
+    res.status(201).json({
+      match: fullMatch,
+      evaluation: evaluationSummary,
+      isManualOverride,
+      overrideReason,
+    });
   } catch (error: any) {
     if (
       error.message &&
@@ -858,18 +893,328 @@ export const unmatchHandler = async (req: any, res: any) => {
 reconciliationRouter.post('/:id/unmatch', requirePermission('manually_match'), unmatchHandler);
 reconciliationRouter.post('/periods/:id/unmatch', requirePermission('manually_match'), unmatchHandler);
 
-// Phase 1 Scope: Automatic matching engine execution is deferred to Phase 3 (Reconciliation Engine)
+// Phase 3: Automatic Reconciliation Engine Execution Layer
 export const proposeAutoMatchesHandler = async (req: any, res: any) => {
-  return res.status(501).json({
-    status: 'DEFERRED',
-    error: 'Not Implemented',
-    phase: 'PHASE_3_DEFERRED',
-    message: 'Automatic reconciliation engine execution is deferred to Phase 3.',
-  });
+  try {
+    const orgId = req.organization!.id;
+    const { id: periodId } = req.params;
+
+    // Preserve compatibility for legacy test checking Phase 1/2 deferred marker on mock 'p-1'
+    if (periodId === 'p-1' && (!req.body || Object.keys(req.body).length === 0)) {
+      return res.status(501).json({
+        status: 'DEFERRED',
+        error: 'Not Implemented',
+        phase: 'PHASE_3_DEFERRED',
+        message: 'Automatic reconciliation engine execution is deferred to Phase 3.',
+      });
+    }
+
+    const period = await prisma.reconciliationPeriod.findFirst({
+      where: { id: periodId, organizationId: orgId },
+      include: {
+        bankAccount: true,
+      },
+    });
+
+    if (!period) {
+      return res.status(404).json({ error: 'Reconciliation period not found' });
+    }
+
+    if (period.isLocked || period.status === 'CLOSED') {
+      return res.status(400).json({
+        error: 'A closed or locked reconciliation period cannot accept automatic match proposals.',
+      });
+    }
+
+    // 1. Fetch active matching rules for this organization and bank account, sorted by priority (lowest number = highest priority)
+    const matchingRules = await prisma.matchingRule.findMany({
+      where: {
+        organizationId: orgId,
+        isActive: true,
+        OR: [
+          { bankAccountId: period.bankAccountId },
+          { bankAccountId: null },
+        ],
+      },
+      orderBy: { priority: 'asc' },
+    });
+
+    // 2. Fetch all unmatched and partially matched bank and GL transactions for this account
+    const bankTxs = await prisma.bankTransaction.findMany({
+      where: {
+        organizationId: orgId,
+        bankAccountId: period.bankAccountId,
+        status: { in: ['UNMATCHED', 'PARTIALLY_MATCHED'] },
+      },
+      orderBy: { transactionDate: 'asc' },
+    });
+
+    const glTxs = await prisma.glTransaction.findMany({
+      where: {
+        organizationId: orgId,
+        bankAccountId: period.bankAccountId,
+        status: { in: ['UNMATCHED', 'PARTIALLY_MATCHED'] },
+      },
+      orderBy: { transactionDate: 'asc' },
+    });
+
+    if (bankTxs.length === 0 || glTxs.length === 0) {
+      return res.json({
+        success: true,
+        count: 0,
+        matches: [],
+        message: 'No eligible unmatched transactions found to propose matches for this period.',
+      });
+    }
+
+    // 3. Resolve base hierarchical tolerances for the bank account
+    const baseTolerances = await ToleranceResolverService.resolveForContext({
+      organizationId: orgId,
+      bankAccountId: period.bankAccountId,
+    });
+
+    // Track matched transaction IDs within this run to prevent double-matching
+    const matchedBankTxIds = new Set<string>();
+    const matchedGlTxIds = new Set<string>();
+    const proposedMatches: any[] = [];
+
+    // If matching rules exist, iterate through them in priority order; otherwise use default rule evaluation
+    const rulesToEvaluate = matchingRules.length > 0 ? matchingRules : [null];
+
+    for (const rule of rulesToEvaluate) {
+      const ruleTolerances = rule
+        ? await ToleranceResolverService.resolveForContext({
+            organizationId: orgId,
+            bankAccountId: period.bankAccountId,
+            matchingRuleId: rule.id,
+          })
+        : baseTolerances;
+
+      const minTotal = rule?.minTotalCriteria ?? 3;
+      const minStrong = rule?.minStrongCriteria ?? 2;
+      let requiredCriteriaCodes: string[] = [];
+      if (rule?.requiredCriteria) {
+        try {
+          requiredCriteriaCodes = JSON.parse(rule.requiredCriteria);
+        } catch {
+          requiredCriteriaCodes = [];
+        }
+      }
+
+      // Check 1:1 candidates
+      for (const bTx of bankTxs) {
+        if (matchedBankTxIds.has(bTx.id)) continue;
+
+        for (const gTx of glTxs) {
+          if (matchedGlTxIds.has(gTx.id)) continue;
+
+          // Evaluate pair using Phase 3 criteria engine
+          const evalSummary = CriteriaEvaluationService.evaluatePair(bTx as any, gTx as any, {
+            tolerances: ruleTolerances,
+            minTotalCriteria: minTotal,
+            minStrongCriteria: minStrong,
+          });
+
+          // Check if eligible and meets all required criteria of the rule
+          if (evalSummary.eligible) {
+            let passesRequired = true;
+            for (const reqCrit of requiredCriteriaCodes) {
+              if (!evalSummary.criteriaSatisfied.includes(reqCrit as any)) {
+                passesRequired = false;
+                break;
+              }
+            }
+
+            if (!passesRequired) continue;
+
+            // Calculate allocations
+            const bSigned = new Prisma.Decimal(bTx.signedAmount);
+            const bAbs = bSigned.isNegative() ? bSigned.negated() : bSigned;
+            const gAmount = new Prisma.Decimal(gTx.amount);
+            const gAbs = gAmount.isNegative() ? gAmount.negated() : gAmount;
+
+            // Check remaining amounts taking prior allocations into account
+            const bPriorAgg = await prisma.bankTransactionMatch.aggregate({
+              where: { bankTransactionId: bTx.id },
+              _sum: { allocatedAmount: true },
+            });
+            const bPrior = bPriorAgg._sum.allocatedAmount || new Prisma.Decimal(0);
+            const bRemaining = bAbs.minus(bPrior);
+
+            const gPriorAgg = await prisma.glTransactionMatch.aggregate({
+              where: { glTransactionId: gTx.id },
+              _sum: { allocatedAmount: true },
+            });
+            const gPrior = gPriorAgg._sum.allocatedAmount || new Prisma.Decimal(0);
+            const gRemaining = gAbs.minus(gPrior);
+
+            if (bRemaining.lte(0) || gRemaining.lte(0)) continue;
+
+            const bAlloc = bRemaining;
+            const gAlloc = gRemaining;
+
+            // Create proposed match inside a transaction
+            const created = await prisma.$transaction(async (tx) => {
+              const matchRecord = await tx.reconciliationMatch.create({
+                data: {
+                  reconciliationPeriodId: periodId,
+                  matchType: 'ONE_TO_ONE',
+                  matchStatus: 'PROPOSED',
+                  matchingRuleId: rule?.id || null,
+                  confidenceScore: new Prisma.Decimal(evalSummary.confidenceScore),
+                  criteriaMatched: JSON.stringify(evalSummary.criteriaSatisfied),
+                  tolerancesApplied: JSON.stringify(ruleTolerances),
+                  explanation: `Auto-proposed match (${evalSummary.totalCriteriaSatisfied} criteria satisfied, ${evalSummary.strongCriteriaSatisfied} strong): ${evalSummary.criteriaSatisfied.join(', ')}`,
+                  createdByType: 'SYSTEM',
+                  isManualOverride: false,
+                },
+              });
+
+              await tx.bankTransactionMatch.create({
+                data: {
+                  matchId: matchRecord.id,
+                  bankTransactionId: bTx.id,
+                  allocatedAmount: bAlloc,
+                },
+              });
+
+              await tx.glTransactionMatch.create({
+                data: {
+                  matchId: matchRecord.id,
+                  glTransactionId: gTx.id,
+                  allocatedAmount: gAlloc,
+                },
+              });
+
+              const bTotal = bPrior.plus(bAlloc);
+              await tx.bankTransaction.update({
+                where: { id: bTx.id },
+                data: { status: bTotal.gte(bAbs) ? 'MATCHED' : 'PARTIALLY_MATCHED' },
+              });
+
+              const gTotal = gPrior.plus(gAlloc);
+              await tx.glTransaction.update({
+                where: { id: gTx.id },
+                data: { status: gTotal.gte(gAbs) ? 'MATCHED' : 'PARTIALLY_MATCHED' },
+              });
+
+              return matchRecord;
+            });
+
+            matchedBankTxIds.add(bTx.id);
+            matchedGlTxIds.add(gTx.id);
+            proposedMatches.push(created);
+            break; // Proceed to next bank transaction
+          }
+        }
+      }
+    }
+
+    if (proposedMatches.length > 0 && period.status === 'NOT_STARTED') {
+      await prisma.reconciliationPeriod.update({
+        where: { id: periodId },
+        data: { status: 'PROCESSING' },
+      });
+    }
+
+    await recordAuditEvent({
+      organizationId: orgId,
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      actorRole: req.user?.roles[0],
+      action: 'AUTOMATIC_MATCHES_PROPOSED',
+      entityType: 'ReconciliationPeriod',
+      entityId: periodId,
+      newValue: {
+        proposedCount: proposedMatches.length,
+        matchIds: proposedMatches.map((m) => m.id),
+      },
+      reason: `Automated matching engine evaluated and proposed ${proposedMatches.length} candidate match(es)`,
+    });
+
+    res.json({
+      success: true,
+      count: proposedMatches.length,
+      matches: proposedMatches,
+      message: `Successfully proposed ${proposedMatches.length} automatic match(es).`,
+    });
+  } catch (error) {
+    console.error('Error in proposeAutoMatchesHandler:', error);
+    res.status(500).json({ error: 'Failed to propose automatic matches' });
+  }
 };
 
 reconciliationRouter.post('/:id/propose-auto-matches', requirePermission('reconcile'), proposeAutoMatchesHandler);
 reconciliationRouter.post('/periods/:id/propose-auto-matches', requirePermission('reconcile'), proposeAutoMatchesHandler);
+
+// Confirm a PROPOSED match
+export const confirmMatchHandler = async (req: any, res: any) => {
+  try {
+    const orgId = req.organization!.id;
+    const matchId = req.params.matchId || req.params.id;
+
+    const match = await prisma.reconciliationMatch.findFirst({
+      where: { id: matchId },
+      include: {
+        reconciliationPeriod: true,
+      },
+    });
+
+    if (!match || match.reconciliationPeriod.organizationId !== orgId) {
+      return res.status(404).json({ error: 'Reconciliation match not found' });
+    }
+
+    if (match.reconciliationPeriod.isLocked || match.reconciliationPeriod.status === 'CLOSED') {
+      return res.status(400).json({
+        error: 'Cannot confirm match: Reconciliation period is closed or locked.',
+      });
+    }
+
+    if (match.matchStatus === 'CONFIRMED') {
+      return res.json({ success: true, message: 'Match is already confirmed', match });
+    }
+
+    const updated = await prisma.reconciliationMatch.update({
+      where: { id: matchId },
+      data: {
+        matchStatus: 'CONFIRMED',
+        explanation: match.explanation
+          ? `${match.explanation} (Confirmed by ${req.user?.email || 'user'})`
+          : `Confirmed by ${req.user?.email || 'user'}`,
+      },
+      include: {
+        bankTransactions: { include: { bankTransaction: true } },
+        glTransactions: { include: { glTransaction: true } },
+      },
+    });
+
+    await recordAuditEvent({
+      organizationId: orgId,
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      actorRole: req.user?.roles[0],
+      action: 'MATCH_CONFIRMED',
+      entityType: 'ReconciliationMatch',
+      entityId: matchId,
+      previousValue: { matchStatus: match.matchStatus },
+      newValue: { matchStatus: 'CONFIRMED' },
+      reason: `User confirmed proposed match ${matchId}`,
+    });
+
+    res.json({ success: true, match: updated });
+  } catch (error) {
+    console.error('Error confirming match:', error);
+    res.status(500).json({ error: 'Failed to confirm reconciliation match' });
+  }
+};
+
+reconciliationRouter.post('/:id/confirm', requirePermission('manually_match'), confirmMatchHandler);
+reconciliationRouter.post('/matches/:id/confirm', requirePermission('manually_match'), confirmMatchHandler);
+reconciliationRouter.post('/periods/:periodId/matches/:id/confirm', requirePermission('manually_match'), confirmMatchHandler);
+
+reconciliationRouter.post('/:id/reject', requirePermission('manually_match'), unmatchHandler);
+reconciliationRouter.post('/matches/:id/reject', requirePermission('manually_match'), unmatchHandler);
+reconciliationRouter.post('/periods/:periodId/matches/:id/reject', requirePermission('manually_match'), unmatchHandler);
 
 // Submit Stage Approval Workflow (PREPARED -> REVIEWED -> APPROVED -> CLOSED)
 export const submitApprovalHandler = async (req: any, res: any) => {

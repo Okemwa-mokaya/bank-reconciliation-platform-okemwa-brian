@@ -453,6 +453,10 @@ model ReconciliationMatch {
   explanation            String?
   createdByType          String                 @default("SYSTEM") // SYSTEM, USER
   createdById            String?
+  isManualOverride       Boolean                @default(false)
+  overrideReason         String?
+  overriddenById         String?
+  overriddenAt           DateTime?
   createdAt              DateTime               @default(now())
   updatedAt              DateTime               @updatedAt
 

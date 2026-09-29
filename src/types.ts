@@ -215,6 +215,10 @@ export interface ReconciliationMatch {
   criteriaMatched: string;
   tolerancesApplied?: string | null;
   explanation?: string | null;
+  isManualOverride?: boolean;
+  overrideReason?: string | null;
+  overriddenById?: string | null;
+  overriddenAt?: string | null;
   createdAt: string;
   matchingRule?: { name: string } | null;
   bankTransactions: {

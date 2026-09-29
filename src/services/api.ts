@@ -283,6 +283,19 @@ export const api = {
   },
   getPeriodMatches: (periodId: string) =>
     request<{ matches: ReconciliationMatch[] }>(`/api/reconciliations/periods/${periodId}/matches`),
+  proposeAutoMatches: (periodId: string) =>
+    request<{ success: boolean; count: number; matches: ReconciliationMatch[]; message: string }>(
+      `/api/reconciliations/periods/${periodId}/propose-auto-matches`,
+      { method: 'POST' }
+    ),
+  confirmMatch: (matchId: string) =>
+    request<{ success: boolean; match: ReconciliationMatch }>(`/api/reconciliations/matches/${matchId}/confirm`, {
+      method: 'POST',
+    }),
+  unmatch: (matchId: string) =>
+    request<{ success: boolean; message: string }>(`/api/reconciliations/${matchId}/unmatch`, {
+      method: 'POST',
+    }),
 
   // Matching Controls & Rules
   getMatchingCriteria: () =>

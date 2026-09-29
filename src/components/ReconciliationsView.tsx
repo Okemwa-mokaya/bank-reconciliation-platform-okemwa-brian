@@ -1,17 +1,19 @@
 import React, { useState, useEffect } from 'react';
 import { ReconciliationPeriod, ReconciliationMatch } from '../types';
 import { api } from '../services/api';
-import { Calendar, CheckCircle2, Lock, Eye, GitMerge, FileCheck, Layers } from 'lucide-react';
+import { Calendar, CheckCircle2, Lock, Eye, GitMerge, FileCheck, Layers, AlertTriangle, Play, Sparkles } from 'lucide-react';
 
 interface ReconciliationsViewProps {
   periods: ReconciliationPeriod[];
   onRefresh: () => void;
 }
 
-export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ periods }) => {
+export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ periods, onRefresh }) => {
   const [selectedPeriod, setSelectedPeriod] = useState<ReconciliationPeriod | null>(null);
   const [matches, setMatches] = useState<ReconciliationMatch[]>([]);
   const [isLoadingMatches, setIsLoadingMatches] = useState(false);
+  const [isProposingAuto, setIsProposingAuto] = useState(false);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (selectedPeriod) {
@@ -28,6 +30,46 @@ export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ period
       console.error('Failed to load period matches:', err);
     } finally {
       setIsLoadingMatches(false);
+    }
+  };
+
+  const handleProposeAutoMatches = async (periodId: string) => {
+    setIsProposingAuto(true);
+    setActionMessage(null);
+    try {
+      const res = await api.proposeAutoMatches(periodId);
+      setActionMessage(res.message || `Auto-matching complete: proposed ${res.count} match(es).`);
+      await loadPeriodMatches(periodId);
+      onRefresh();
+    } catch (err: any) {
+      console.error('Failed to run automatic matching:', err);
+      setActionMessage(`Auto-matching failed: ${err.message || 'Unknown error'}`);
+    } finally {
+      setIsProposingAuto(false);
+    }
+  };
+
+  const handleConfirmMatch = async (matchId: string) => {
+    try {
+      await api.confirmMatch(matchId);
+      if (selectedPeriod) {
+        await loadPeriodMatches(selectedPeriod.id);
+        onRefresh();
+      }
+    } catch (err) {
+      console.error('Failed to confirm match:', err);
+    }
+  };
+
+  const handleUnmatch = async (matchId: string) => {
+    try {
+      await api.unmatch(matchId);
+      if (selectedPeriod) {
+        await loadPeriodMatches(selectedPeriod.id);
+        onRefresh();
+      }
+    } catch (err) {
+      console.error('Failed to unmatch:', err);
     }
   };
 
@@ -58,8 +100,8 @@ export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ period
               Reconciliation lifecycle tracking, approval hierarchy, and topological match relationships (1:1, 1:Many, Many:Many)
             </p>
           </div>
-          <span className="inline-flex items-center px-2.5 py-1 rounded-md text-[11px] font-semibold bg-stone-100 text-stone-800 border border-stone-300">
-            Phase 1 Foundation: Topological Data Models & Manual Matching Active • Auto-Engine Deferred to Phase 3
+          <span className="inline-flex items-center px-2.5 py-1 rounded-md text-[11px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-300">
+            Phase 3 Production Complete: Criteria Engine & Automatic Reconciliation Execution Active
           </span>
         </div>
       </div>
@@ -145,7 +187,7 @@ export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ period
       {/* Matches Inspection Drawer */}
       {selectedPeriod && (
         <div className="bg-stone-50 border border-stone-300 rounded-xl p-5 shadow-xs space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h3 className="text-sm font-bold text-stone-900">
                 Matches for {selectedPeriod.bankAccount.accountName} (
@@ -155,13 +197,40 @@ export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ period
                 Topological match junction records linking bank transactions to GL journal entries
               </p>
             </div>
-            <button
-              onClick={() => setSelectedPeriod(null)}
-              className="text-xs text-stone-500 hover:text-stone-800 font-semibold"
-            >
-              Close
-            </button>
+            <div className="flex items-center space-x-2">
+              {!selectedPeriod.isLocked && selectedPeriod.status !== 'CLOSED' && (
+                <button
+                  onClick={() => handleProposeAutoMatches(selectedPeriod.id)}
+                  disabled={isProposingAuto}
+                  className="inline-flex items-center space-x-1.5 px-3 py-1.5 text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>{isProposingAuto ? 'Evaluating...' : 'Run Auto-Reconciliation'}</span>
+                </button>
+              )}
+              <button
+                onClick={() => {
+                  setSelectedPeriod(null);
+                  setActionMessage(null);
+                }}
+                className="text-xs text-stone-500 hover:text-stone-800 font-semibold px-2 py-1"
+              >
+                Close
+              </button>
+            </div>
           </div>
+
+          {actionMessage && (
+            <div className="text-xs bg-emerald-50 border border-emerald-200 text-emerald-800 px-3 py-2 rounded-lg flex items-center justify-between">
+              <span>{actionMessage}</span>
+              <button
+                onClick={() => setActionMessage(null)}
+                className="text-emerald-700 hover:text-emerald-950 font-bold ml-2"
+              >
+                ×
+              </button>
+            </div>
+          )}
 
           {isLoadingMatches ? (
             <div className="py-8 text-center text-xs text-stone-500">Loading period matches...</div>
@@ -171,89 +240,139 @@ export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ period
             </div>
           ) : (
             <div className="space-y-3">
-              {matches.map((match) => (
-                <div key={match.id} className="bg-white border border-stone-200 rounded-lg p-4 shadow-2xs text-xs space-y-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-100 pb-2">
-                    <div className="flex items-center space-x-2">
-                      <GitMerge className="w-4 h-4 text-emerald-600" />
-                      <span className="font-bold text-stone-900 uppercase">{match.matchType} MATCH</span>
-                      <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">
-                        {match.matchStatus}
-                      </span>
-                    </div>
+              {matches.map((match) => {
+                const isOverride = match.isManualOverride || match.explanation?.includes('[MANUAL_OVERRIDE]');
 
-                    <div className="flex items-center space-x-3 text-stone-500 text-[11px]">
-                      <span>
-                        Confidence:{' '}
-                        <span className="font-mono font-bold text-stone-800">
-                          {Math.round(match.confidenceScore * 100)}%
+                return (
+                  <div key={match.id} className="bg-white border border-stone-200 rounded-lg p-4 shadow-2xs text-xs space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-100 pb-2">
+                      <div className="flex items-center space-x-2">
+                        <GitMerge className="w-4 h-4 text-emerald-600" />
+                        <span className="font-bold text-stone-900 uppercase">{match.matchType} MATCH</span>
+                        <span
+                          className={`text-[10px] px-2 py-0.5 rounded font-semibold ${
+                            match.matchStatus === 'CONFIRMED'
+                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                              : match.matchStatus === 'PROPOSED'
+                              ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                              : 'bg-stone-50 text-stone-700 border border-stone-200'
+                          }`}
+                        >
+                          {match.matchStatus}
                         </span>
-                      </span>
-                      <span>
-                        Rule: <span className="font-medium text-stone-700">{match.matchingRule?.name || 'Manual'}</span>
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Matched Criteria Pills */}
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-[11px] font-semibold text-stone-500">Criteria Met:</span>
-                    {JSON.parse(match.criteriaMatched || '[]').map((crit: string) => (
-                      <span
-                        key={crit}
-                        className="px-2 py-0.5 rounded bg-stone-100 text-stone-700 font-mono text-[10px] border border-stone-200"
-                      >
-                        {crit}
-                      </span>
-                    ))}
-                  </div>
-
-                  {match.explanation && (
-                    <p className="text-[11px] text-stone-600 bg-stone-50 p-2 rounded border border-stone-100">
-                      {match.explanation}
-                    </p>
-                  )}
-
-                  {/* Linked Bank & GL Transaction Details */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2">
-                    {/* Bank Side */}
-                    <div className="bg-stone-50/70 p-3 rounded-md border border-stone-200/80">
-                      <div className="text-[10px] font-bold text-stone-500 uppercase tracking-wider mb-1.5">
-                        Bank Transaction(s) [{match.bankTransactions.length}]
+                        {isOverride && (
+                          <span className="text-[10px] px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-300 font-bold inline-flex items-center gap-1">
+                            <AlertTriangle className="w-3 h-3 text-amber-600" />
+                            MANUAL OVERRIDE
+                          </span>
+                        )}
                       </div>
-                      {match.bankTransactions.map((btm) => (
-                        <div key={btm.id} className="text-xs space-y-0.5">
-                          <div className="font-semibold text-stone-900">{btm.bankTransaction.description}</div>
-                          <div className="flex justify-between text-stone-500 text-[11px]">
-                            <span>Date: {formatDate(btm.bankTransaction.transactionDate)}</span>
-                            <span className="font-mono font-bold text-emerald-700">
-                              {formatCurrency(btm.allocatedAmount, btm.bankTransaction.currency)}
-                            </span>
+
+                      <div className="flex items-center space-x-3 text-stone-500 text-[11px]">
+                        <span>
+                          Confidence:{' '}
+                          <span className="font-mono font-bold text-stone-800">
+                            {Math.round(match.confidenceScore * 100)}%
+                          </span>
+                        </span>
+                        <span>
+                          Rule: <span className="font-medium text-stone-700">{match.matchingRule?.name || (isOverride ? 'Manual Override' : 'Manual')}</span>
+                        </span>
+
+                        {/* Match Action Buttons */}
+                        {match.matchStatus === 'PROPOSED' && !selectedPeriod.isLocked && (
+                          <div className="flex items-center space-x-1 pl-2">
+                            <button
+                              onClick={() => handleConfirmMatch(match.id)}
+                              className="px-2 py-0.5 text-[10px] font-semibold bg-emerald-600 hover:bg-emerald-700 text-white rounded transition-colors"
+                            >
+                              Confirm
+                            </button>
+                            <button
+                              onClick={() => handleUnmatch(match.id)}
+                              className="px-2 py-0.5 text-[10px] font-semibold bg-stone-100 hover:bg-stone-200 text-stone-700 rounded transition-colors"
+                            >
+                              Reject
+                            </button>
                           </div>
-                        </div>
+                        )}
+                        {match.matchStatus === 'CONFIRMED' && !selectedPeriod.isLocked && (
+                          <button
+                            onClick={() => handleUnmatch(match.id)}
+                            className="px-2 py-0.5 text-[10px] font-semibold text-rose-600 hover:text-rose-800 hover:bg-rose-50 rounded transition-colors border border-rose-200 ml-1"
+                          >
+                            Unmatch
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Matched Criteria Pills */}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-[11px] font-semibold text-stone-500">Criteria Met:</span>
+                      {JSON.parse(match.criteriaMatched || '[]').map((crit: string) => (
+                        <span
+                          key={crit}
+                          className="px-2 py-0.5 rounded bg-stone-100 text-stone-700 font-mono text-[10px] border border-stone-200"
+                        >
+                          {crit}
+                        </span>
                       ))}
                     </div>
 
-                    {/* GL Side */}
-                    <div className="bg-stone-50/70 p-3 rounded-md border border-stone-200/80">
-                      <div className="text-[10px] font-bold text-stone-500 uppercase tracking-wider mb-1.5">
-                        General Ledger Item(s) [{match.glTransactions.length}]
+                    {match.overrideReason && (
+                      <div className="text-[11px] text-amber-900 bg-amber-50/90 p-2 rounded border border-amber-200">
+                        <span className="font-semibold">Override Reason:</span> {match.overrideReason}
                       </div>
-                      {match.glTransactions.map((gtm) => (
-                        <div key={gtm.id} className="text-xs space-y-0.5">
-                          <div className="font-semibold text-stone-900">{gtm.glTransaction.narration}</div>
-                          <div className="flex justify-between text-stone-500 text-[11px]">
-                            <span>Date: {formatDate(gtm.glTransaction.transactionDate)}</span>
-                            <span className="font-mono font-bold text-emerald-700">
-                              {formatCurrency(gtm.allocatedAmount, gtm.glTransaction.currency)}
-                            </span>
-                          </div>
+                    )}
+
+                    {match.explanation && (
+                      <p className="text-[11px] text-stone-600 bg-stone-50 p-2 rounded border border-stone-100">
+                        {match.explanation}
+                      </p>
+                    )}
+
+                    {/* Linked Bank & GL Transaction Details */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2">
+                      {/* Bank Side */}
+                      <div className="bg-stone-50/70 p-3 rounded-md border border-stone-200/80">
+                        <div className="text-[10px] font-bold text-stone-500 uppercase tracking-wider mb-1.5">
+                          Bank Transaction(s) [{match.bankTransactions.length}]
                         </div>
-                      ))}
+                        {match.bankTransactions.map((btm) => (
+                          <div key={btm.id} className="text-xs space-y-0.5">
+                            <div className="font-semibold text-stone-900">{btm.bankTransaction.description}</div>
+                            <div className="flex justify-between text-stone-500 text-[11px]">
+                              <span>Date: {formatDate(btm.bankTransaction.transactionDate)}</span>
+                              <span className="font-mono font-bold text-emerald-700">
+                                {formatCurrency(btm.allocatedAmount, btm.bankTransaction.currency)}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* GL Side */}
+                      <div className="bg-stone-50/70 p-3 rounded-md border border-stone-200/80">
+                        <div className="text-[10px] font-bold text-stone-500 uppercase tracking-wider mb-1.5">
+                          General Ledger Item(s) [{match.glTransactions.length}]
+                        </div>
+                        {match.glTransactions.map((gtm) => (
+                          <div key={gtm.id} className="text-xs space-y-0.5">
+                            <div className="font-semibold text-stone-900">{gtm.glTransaction.narration}</div>
+                            <div className="flex justify-between text-stone-500 text-[11px]">
+                              <span>Date: {formatDate(gtm.glTransaction.transactionDate)}</span>
+                              <span className="font-mono font-bold text-emerald-700">
+                                {formatCurrency(gtm.allocatedAmount, gtm.glTransaction.currency)}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
