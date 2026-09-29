@@ -768,20 +768,25 @@ reconciliationRouter.post('/periods/:id/matches', requirePermission('manually_ma
 export const unmatchHandler = async (req: any, res: any) => {
   try {
     const orgId = req.organization!.id;
-    const { id: periodId } = req.params;
-    const { matchId } = req.body;
+    const { id } = req.params;
+    const bodyMatchId = req.body?.matchId;
 
-    if (!matchId) {
-      return res.status(400).json({ error: 'Missing matchId in request body' });
-    }
+    // Support both endpoint shapes:
+    // POST /reconciliations/:matchId/unmatch
+    // POST /reconciliations/periods/:periodId/unmatch { matchId }
+    const matchId = bodyMatchId || id;
 
-    const period = await prisma.reconciliationPeriod.findFirst({
-      where: { id: periodId, organizationId: orgId },
+    const initialMatch = await prisma.reconciliationMatch.findFirst({
+      where: { id: matchId },
+      include: { reconciliationPeriod: true },
     });
 
-    if (!period) {
-      return res.status(404).json({ error: 'Reconciliation period not found' });
+    if (!initialMatch || initialMatch.reconciliationPeriod.organizationId !== orgId) {
+      return res.status(404).json({ error: 'Reconciliation match not found' });
     }
+
+    const periodId = initialMatch.reconciliationPeriodId;
+    const period = initialMatch.reconciliationPeriod;
 
     if (period.isLocked || period.status === 'CLOSED') {
       return res.status(403).json({ error: 'Cannot unmatch on a locked or closed reconciliation period' });
@@ -1086,17 +1091,8 @@ export const proposeAutoMatchesHandler = async (req: any, res: any) => {
                 },
               });
 
-              const bTotal = bPrior.plus(bAlloc);
-              await tx.bankTransaction.update({
-                where: { id: bTx.id },
-                data: { status: bTotal.gte(bAbs) ? 'MATCHED' : 'PARTIALLY_MATCHED' },
-              });
-
-              const gTotal = gPrior.plus(gAlloc);
-              await tx.glTransaction.update({
-                where: { id: gTx.id },
-                data: { status: gTotal.gte(gAbs) ? 'MATCHED' : 'PARTIALLY_MATCHED' },
-              });
+              // Proposal creation must not change transaction status.
+              // Bank/GL transactions become MATCHED or PARTIALLY_MATCHED only when a proposal is confirmed.
 
               return matchRecord;
             });
@@ -1157,6 +1153,8 @@ export const confirmMatchHandler = async (req: any, res: any) => {
       where: { id: matchId },
       include: {
         reconciliationPeriod: true,
+        bankTransactions: true,
+        glTransactions: true,
       },
     });
 
@@ -1170,36 +1168,102 @@ export const confirmMatchHandler = async (req: any, res: any) => {
       });
     }
 
-    if (match.matchStatus === 'CONFIRMED') {
-      return res.json({ success: true, message: 'Match is already confirmed', match });
+    const wasAlreadyConfirmed = match.matchStatus === 'CONFIRMED';
+
+    const updated = await prisma.$transaction(async (tx) => {
+      if (!wasAlreadyConfirmed) {
+        await tx.reconciliationMatch.update({
+          where: { id: matchId },
+          data: {
+            matchStatus: 'CONFIRMED',
+            explanation: match.explanation
+              ? `${match.explanation} (Confirmed by ${req.user?.email || 'user'})`
+              : `Confirmed by ${req.user?.email || 'user'}`,
+          },
+        });
+      }
+
+      // Transaction statuses are authoritative consequences of confirmed allocations.
+      // Proposed matches must not change BankTransaction/GlTransaction status.
+      for (const link of match.bankTransactions) {
+        const allocations = await tx.bankTransactionMatch.aggregate({
+          where: {
+            bankTransactionId: link.bankTransactionId,
+            match: { matchStatus: 'CONFIRMED' },
+          },
+          _sum: { allocatedAmount: true },
+        });
+
+        const bankTx = await tx.bankTransaction.findUnique({
+          where: { id: link.bankTransactionId },
+        });
+        if (!bankTx) continue;
+
+        const allocated = allocations._sum.allocatedAmount || new Prisma.Decimal(0);
+        const amount = new Prisma.Decimal(bankTx.signedAmount).abs();
+        const status = allocated.isZero()
+          ? 'UNMATCHED'
+          : allocated.lt(amount)
+            ? 'PARTIALLY_MATCHED'
+            : 'MATCHED';
+
+        await tx.bankTransaction.update({
+          where: { id: link.bankTransactionId },
+          data: { status },
+        });
+      }
+
+      for (const link of match.glTransactions) {
+        const allocations = await tx.glTransactionMatch.aggregate({
+          where: {
+            glTransactionId: link.glTransactionId,
+            match: { matchStatus: 'CONFIRMED' },
+          },
+          _sum: { allocatedAmount: true },
+        });
+
+        const glTx = await tx.glTransaction.findUnique({
+          where: { id: link.glTransactionId },
+        });
+        if (!glTx) continue;
+
+        const allocated = allocations._sum.allocatedAmount || new Prisma.Decimal(0);
+        const amount = new Prisma.Decimal(glTx.amount).abs();
+        const status = allocated.isZero()
+          ? 'UNMATCHED'
+          : allocated.lt(amount)
+            ? 'PARTIALLY_MATCHED'
+            : 'MATCHED';
+
+        await tx.glTransaction.update({
+          where: { id: link.glTransactionId },
+          data: { status },
+        });
+      }
+
+      return tx.reconciliationMatch.findUnique({
+        where: { id: matchId },
+        include: {
+          bankTransactions: { include: { bankTransaction: true } },
+          glTransactions: { include: { glTransaction: true } },
+        },
+      });
+    });
+
+    if (!wasAlreadyConfirmed) {
+      await recordAuditEvent({
+        organizationId: orgId,
+        actorId: req.user?.id,
+        actorEmail: req.user?.email,
+        actorRole: req.user?.roles[0],
+        action: 'MATCH_CONFIRMED',
+        entityType: 'ReconciliationMatch',
+        entityId: matchId,
+        previousValue: { matchStatus: match.matchStatus },
+        newValue: { matchStatus: 'CONFIRMED' },
+        reason: `User confirmed proposed match ${matchId}`,
+      });
     }
-
-    const updated = await prisma.reconciliationMatch.update({
-      where: { id: matchId },
-      data: {
-        matchStatus: 'CONFIRMED',
-        explanation: match.explanation
-          ? `${match.explanation} (Confirmed by ${req.user?.email || 'user'})`
-          : `Confirmed by ${req.user?.email || 'user'}`,
-      },
-      include: {
-        bankTransactions: { include: { bankTransaction: true } },
-        glTransactions: { include: { glTransaction: true } },
-      },
-    });
-
-    await recordAuditEvent({
-      organizationId: orgId,
-      actorId: req.user?.id,
-      actorEmail: req.user?.email,
-      actorRole: req.user?.roles[0],
-      action: 'MATCH_CONFIRMED',
-      entityType: 'ReconciliationMatch',
-      entityId: matchId,
-      previousValue: { matchStatus: match.matchStatus },
-      newValue: { matchStatus: 'CONFIRMED' },
-      reason: `User confirmed proposed match ${matchId}`,
-    });
 
     res.json({ success: true, match: updated });
   } catch (error) {
