@@ -1465,6 +1465,60 @@ export const submitApprovalHandler = async (req: any, res: any) => {
           error: `Invalid state transition: Cannot prepare period from status ${period.status}. Expected one of: ${allowedPrior.join(', ')}`,
         });
       }
+
+      // A period may only be prepared when every relevant bank/GL transaction
+      // is fully reconciled. PARTIALLY_MATCHED and UNMATCHED transactions are
+      // incomplete and must block preparation. EXCLUDED transactions are
+      // intentionally outside the reconciliation population.
+      const incompleteBankTransactions = await prisma.bankTransaction.count({
+        where: {
+          organizationId: orgId,
+          bankAccountId: period.bankAccountId,
+          transactionDate: {
+            gte: period.periodStart,
+            lte: period.periodEnd,
+          },
+          status: {
+            in: ['UNMATCHED', 'PARTIALLY_MATCHED'],
+          },
+        },
+      });
+
+      const incompleteGlTransactions = await prisma.glTransaction.count({
+        where: {
+          organizationId: orgId,
+          bankAccountId: period.bankAccountId,
+          transactionDate: {
+            gte: period.periodStart,
+            lte: period.periodEnd,
+          },
+          status: {
+            in: ['UNMATCHED', 'PARTIALLY_MATCHED'],
+          },
+        },
+      });
+
+      const unresolvedExceptions = await prisma.exceptionRecord.count({
+        where: {
+          organizationId: orgId,
+          reconciliationPeriodId: periodId,
+          status: {
+            in: ['OPEN', 'IN_REVIEW', 'ESCALATED'],
+          },
+        },
+      });
+
+      if (incompleteBankTransactions > 0 || incompleteGlTransactions > 0 || unresolvedExceptions > 0) {
+        return res.status(400).json({
+          error: 'Cannot prepare reconciliation period: all relevant transactions must be fully matched and all exceptions must be resolved or waived.',
+          details: {
+            incompleteBankTransactions,
+            incompleteGlTransactions,
+            unresolvedExceptions,
+          },
+        });
+      }
+
       nextStatus = 'PREPARED';
       updateData.preparedById = req.user?.id;
       updateData.preparedAt = new Date();
