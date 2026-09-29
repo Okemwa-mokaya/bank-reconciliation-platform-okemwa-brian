@@ -1,1 +1,0 @@
-Temporary implementation note for reconciliation period creation workflow.
