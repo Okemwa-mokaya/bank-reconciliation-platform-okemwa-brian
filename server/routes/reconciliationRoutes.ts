@@ -75,8 +75,6 @@ const createPeriodHandler = async (req: any, res: any) => {
         periodEnd: new Date(validated.periodEnd),
         status: 'NOT_STARTED',
         isLocked: false,
-        preparedById: req.user?.id,
-        preparedAt: new Date(),
       },
       include: {
         bankAccount: { include: { bank: true } },
