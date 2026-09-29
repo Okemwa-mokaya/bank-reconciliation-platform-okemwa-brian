@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { ReconciliationPeriod, ReconciliationMatch } from '../types';
+import { BankAccount, ReconciliationPeriod, ReconciliationMatch } from '../types';
 import { api } from '../services/api';
-import { Calendar, CheckCircle2, Lock, Eye, GitMerge, FileCheck, Layers, AlertTriangle, Play, Sparkles } from 'lucide-react';
+import { Calendar, CheckCircle2, Lock, Eye, GitMerge, FileCheck, Layers, AlertTriangle, Play, Sparkles, Plus, X } from 'lucide-react';
 
 interface ReconciliationsViewProps {
   periods: ReconciliationPeriod[];
@@ -14,6 +14,17 @@ export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ period
   const [isLoadingMatches, setIsLoadingMatches] = useState(false);
   const [isProposingAuto, setIsProposingAuto] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+
+  const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]);
+  const [showCreateForm, setShowCreateForm] = useState(false);
+  const [isLoadingAccounts, setIsLoadingAccounts] = useState(false);
+  const [isCreatingPeriod, setIsCreatingPeriod] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [createForm, setCreateForm] = useState({
+    bankAccountId: '',
+    periodStart: '',
+    periodEnd: '',
+  });
 
   useEffect(() => {
     if (selectedPeriod) {
@@ -30,6 +41,67 @@ export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ period
       console.error('Failed to load period matches:', err);
     } finally {
       setIsLoadingMatches(false);
+    }
+  };
+
+  const openCreateForm = async () => {
+    setCreateError(null);
+    setShowCreateForm(true);
+    if (bankAccounts.length === 0) {
+      setIsLoadingAccounts(true);
+      try {
+        const res = await api.getBankAccounts();
+        setBankAccounts(res.accounts.filter((account) => account.isActive));
+      } catch (err: any) {
+        console.error('Failed to load bank accounts:', err);
+        setCreateError(err.message || 'Failed to load bank accounts.');
+      } finally {
+        setIsLoadingAccounts(false);
+      }
+    }
+  };
+
+  const handleCreatePeriod = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setCreateError(null);
+
+    if (!createForm.bankAccountId || !createForm.periodStart || !createForm.periodEnd) {
+      setCreateError('Bank account, period start date, and period end date are required.');
+      return;
+    }
+
+    const start = new Date(`${createForm.periodStart}T00:00:00`);
+    const end = new Date(`${createForm.periodEnd}T23:59:59`);
+
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+      setCreateError('Please provide valid period dates.');
+      return;
+    }
+
+    if (start > end) {
+      setCreateError('Period start date cannot be after the period end date.');
+      return;
+    }
+
+    setIsCreatingPeriod(true);
+    try {
+      const res = await api.createReconciliationPeriod({
+        bankAccountId: createForm.bankAccountId,
+        periodStart: start.toISOString(),
+        periodEnd: end.toISOString(),
+      });
+
+      const createdPeriod = res.period;
+      setShowCreateForm(false);
+      setCreateForm({ bankAccountId: '', periodStart: '', periodEnd: '' });
+      setActionMessage('Reconciliation period created successfully.');
+      setSelectedPeriod(createdPeriod);
+      onRefresh();
+    } catch (err: any) {
+      console.error('Failed to create reconciliation period:', err);
+      setCreateError(err.message || 'Failed to create reconciliation period.');
+    } finally {
+      setIsCreatingPeriod(false);
     }
   };
 
@@ -93,18 +165,118 @@ export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ period
     <div className="space-y-6">
       {/* Header */}
       <div>
-        <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="text-lg font-bold text-stone-900">Reconciliation Periods & Multi-Item Matches</h2>
             <p className="text-xs text-stone-500">
               Reconciliation lifecycle tracking, approval hierarchy, and topological match relationships (1:1, 1:Many, Many:Many)
             </p>
           </div>
-          <span className="inline-flex items-center px-2.5 py-1 rounded-md text-[11px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-300">
-            Phase 3 Production Complete: Criteria Engine & Automatic Reconciliation Execution Active
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="inline-flex items-center px-2.5 py-1 rounded-md text-[11px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-300">
+              Phase 3 Production Complete: Criteria Engine & Automatic Reconciliation Execution Active
+            </span>
+            <button
+              type="button"
+              onClick={openCreateForm}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-stone-900 text-white text-xs font-semibold hover:bg-stone-800 transition-colors"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              New Reconciliation Period
+            </button>
+          </div>
         </div>
       </div>
+
+      {actionMessage && (
+        <div className="text-xs bg-emerald-50 border border-emerald-200 text-emerald-800 px-3 py-2 rounded-lg flex items-center justify-between">
+          <span className="inline-flex items-center gap-1.5"><CheckCircle2 className="w-3.5 h-3.5" />{actionMessage}</span>
+          <button onClick={() => setActionMessage(null)} className="text-emerald-700 hover:text-emerald-950 font-bold ml-2">×</button>
+        </div>
+      )}
+
+      {/* Create Period Form */}
+      {showCreateForm && (
+        <div className="bg-white border border-stone-300 rounded-xl p-5 shadow-sm">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h3 className="text-sm font-bold text-stone-900">Create Reconciliation Period</h3>
+              <p className="text-xs text-stone-500 mt-0.5">Define the bank account and date range that will be evaluated by the reconciliation engine.</p>
+            </div>
+            <button type="button" onClick={() => { setShowCreateForm(false); setCreateError(null); }} className="p-1 text-stone-400 hover:text-stone-800">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <form onSubmit={handleCreatePeriod} className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+            <label className="block">
+              <span className="block text-[10px] font-semibold uppercase tracking-wider text-stone-500 mb-1.5">Bank Account</span>
+              <select
+                value={createForm.bankAccountId}
+                onChange={(e) => setCreateForm((current) => ({ ...current, bankAccountId: e.target.value }))}
+                disabled={isLoadingAccounts || isCreatingPeriod}
+                className="w-full rounded-lg border border-stone-300 bg-white px-3 py-2 text-xs text-stone-800 focus:outline-none focus:ring-2 focus:ring-stone-400"
+              >
+                <option value="">{isLoadingAccounts ? 'Loading accounts...' : 'Select bank account'}</option>
+                {bankAccounts.map((account) => (
+                  <option key={account.id} value={account.id}>
+                    {account.bank.name} — {account.accountName} ({account.accountNumber})
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="block">
+              <span className="block text-[10px] font-semibold uppercase tracking-wider text-stone-500 mb-1.5">Period Start</span>
+              <div className="relative">
+                <Calendar className="absolute left-3 top-2.5 w-3.5 h-3.5 text-stone-400" />
+                <input
+                  type="date"
+                  value={createForm.periodStart}
+                  onChange={(e) => setCreateForm((current) => ({ ...current, periodStart: e.target.value }))}
+                  disabled={isCreatingPeriod}
+                  className="w-full rounded-lg border border-stone-300 bg-white pl-9 pr-3 py-2 text-xs text-stone-800 focus:outline-none focus:ring-2 focus:ring-stone-400"
+                />
+              </div>
+            </label>
+
+            <label className="block">
+              <span className="block text-[10px] font-semibold uppercase tracking-wider text-stone-500 mb-1.5">Period End</span>
+              <div className="relative">
+                <Calendar className="absolute left-3 top-2.5 w-3.5 h-3.5 text-stone-400" />
+                <input
+                  type="date"
+                  value={createForm.periodEnd}
+                  min={createForm.periodStart || undefined}
+                  onChange={(e) => setCreateForm((current) => ({ ...current, periodEnd: e.target.value }))}
+                  disabled={isCreatingPeriod}
+                  className="w-full rounded-lg border border-stone-300 bg-white pl-9 pr-3 py-2 text-xs text-stone-800 focus:outline-none focus:ring-2 focus:ring-stone-400"
+                />
+              </div>
+            </label>
+
+            <button
+              type="submit"
+              disabled={isCreatingPeriod || isLoadingAccounts || bankAccounts.length === 0}
+              className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isCreatingPeriod ? 'Creating...' : 'Create Period'}
+            </button>
+          </form>
+
+          {createError && (
+            <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
+              {createError}
+            </div>
+          )}
+
+          {!isLoadingAccounts && bankAccounts.length === 0 && !createError && (
+            <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              No active bank accounts are available for this organization. Create or activate a bank account before starting a reconciliation period.
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Periods Table */}
       <div className="bg-white border border-stone-200 rounded-xl overflow-hidden shadow-2xs">
