@@ -1304,9 +1304,129 @@ reconciliationRouter.post('/:id/confirm', requirePermission('manually_match'), c
 reconciliationRouter.post('/matches/:id/confirm', requirePermission('manually_match'), confirmMatchHandler);
 reconciliationRouter.post('/periods/:periodId/matches/:id/confirm', requirePermission('manually_match'), confirmMatchHandler);
 
-reconciliationRouter.post('/:id/reject', requirePermission('manually_match'), unmatchHandler);
-reconciliationRouter.post('/matches/:id/reject', requirePermission('manually_match'), unmatchHandler);
-reconciliationRouter.post('/periods/:periodId/matches/:id/reject', requirePermission('manually_match'), unmatchHandler);
+// Reject a proposed match without conflating rejection with reversal of a confirmed match.
+export const rejectMatchHandler = async (req: any, res: any) => {
+  try {
+    const orgId = req.organization!.id;
+    const { id } = req.params;
+    const bodyMatchId = req.body?.matchId;
+    const matchId = bodyMatchId || id;
+
+    const initialMatch = await prisma.reconciliationMatch.findFirst({
+      where: { id: matchId },
+      include: { reconciliationPeriod: true },
+    });
+
+    if (!initialMatch || initialMatch.reconciliationPeriod.organizationId !== orgId) {
+      return res.status(404).json({ error: 'Reconciliation match not found' });
+    }
+
+    if (initialMatch.reconciliationPeriod.isLocked || initialMatch.reconciliationPeriod.status === 'CLOSED') {
+      return res.status(403).json({ error: 'Cannot reject a match on a locked or closed reconciliation period' });
+    }
+
+    if (initialMatch.matchStatus !== 'PROPOSED') {
+      return res.status(400).json({
+        error: `Cannot reject reconciliation match from status ${initialMatch.matchStatus}. Only PROPOSED matches can be rejected.`,
+      });
+    }
+
+    const match = await prisma.reconciliationMatch.findFirst({
+      where: {
+        id: matchId,
+        reconciliationPeriodId: initialMatch.reconciliationPeriodId,
+      },
+      include: {
+        bankTransactions: true,
+        glTransactions: true,
+      },
+    });
+
+    if (!match) {
+      return res.status(404).json({ error: 'Match record not found in period' });
+    }
+
+    await prisma.$transaction(async (tx) => {
+      // A rejected proposal must no longer reserve transaction allocations.
+      await tx.bankTransactionMatch.deleteMany({ where: { matchId } });
+      await tx.glTransactionMatch.deleteMany({ where: { matchId } });
+
+      // Recalculate affected Bank transaction statuses from remaining allocations.
+      const affectedBankTxIds = Array.from(new Set(match.bankTransactions.map((b) => b.bankTransactionId)));
+      for (const bId of affectedBankTxIds) {
+        const bTx = await tx.bankTransaction.findUnique({ where: { id: bId } });
+        if (!bTx) continue;
+
+        const remaining = await tx.bankTransactionMatch.aggregate({
+          where: { bankTransactionId: bId, match: { matchStatus: 'CONFIRMED' } },
+          _sum: { allocatedAmount: true },
+        });
+        const allocated = remaining._sum.allocatedAmount || new Prisma.Decimal(0);
+        const amount = new Prisma.Decimal(bTx.signedAmount).abs();
+        const status = allocated.isZero()
+          ? 'UNMATCHED'
+          : allocated.lt(amount)
+            ? 'PARTIALLY_MATCHED'
+            : 'MATCHED';
+
+        await tx.bankTransaction.update({ where: { id: bId }, data: { status } });
+      }
+
+      // Recalculate affected GL transaction statuses from remaining allocations.
+      const affectedGlTxIds = Array.from(new Set(match.glTransactions.map((g) => g.glTransactionId)));
+      for (const gId of affectedGlTxIds) {
+        const gTx = await tx.glTransaction.findUnique({ where: { id: gId } });
+        if (!gTx) continue;
+
+        const remaining = await tx.glTransactionMatch.aggregate({
+          where: { glTransactionId: gId, match: { matchStatus: 'CONFIRMED' } },
+          _sum: { allocatedAmount: true },
+        });
+        const allocated = remaining._sum.allocatedAmount || new Prisma.Decimal(0);
+        const amount = new Prisma.Decimal(gTx.amount).abs();
+        const status = allocated.isZero()
+          ? 'UNMATCHED'
+          : allocated.lt(amount)
+            ? 'PARTIALLY_MATCHED'
+            : 'MATCHED';
+
+        await tx.glTransaction.update({ where: { id: gId }, data: { status } });
+      }
+
+      await tx.reconciliationMatch.update({
+        where: { id: matchId },
+        data: {
+          matchStatus: 'REJECTED',
+          explanation: match.explanation
+            ? `${match.explanation} (Rejected by ${req.user?.email || 'user'})`
+            : `Rejected by ${req.user?.email || 'user'}`,
+        },
+      });
+    });
+
+    await recordAuditEvent({
+      organizationId: orgId,
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      actorRole: req.user?.roles[0],
+      action: 'MATCH_REJECTED',
+      entityType: 'ReconciliationMatch',
+      entityId: matchId,
+      previousValue: { matchId, status: 'PROPOSED' },
+      newValue: { matchId, status: 'REJECTED' },
+      reason: 'User rejected proposed reconciliation match',
+    });
+
+    res.json({ success: true, message: 'Match proposal rejected' });
+  } catch (error) {
+    console.error('Error rejecting match:', error);
+    res.status(500).json({ error: 'Failed to reject reconciliation match' });
+  }
+};
+
+reconciliationRouter.post('/:id/reject', requirePermission('manually_match'), rejectMatchHandler);
+reconciliationRouter.post('/matches/:id/reject', requirePermission('manually_match'), rejectMatchHandler);
+reconciliationRouter.post('/periods/:periodId/matches/:id/reject', requirePermission('manually_match'), rejectMatchHandler);
 
 // Submit Stage Approval Workflow (PREPARED -> REVIEWED -> APPROVED -> CLOSED)
 export const submitApprovalHandler = async (req: any, res: any) => {
