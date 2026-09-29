@@ -341,11 +341,12 @@ describe('Auto-Matching Engine & Manual Override Hardening', () => {
     );
     expect(proposedMatch).toBeDefined();
 
-    // Verify transaction statuses updated
+    // Proposal creation does not finalize the match. Transactions remain
+    // UNMATCHED until an explicit confirmation.
     const updatedBtx = await prisma.bankTransaction.findUnique({ where: { id: bTx1.id } });
     const updatedGtx = await prisma.glTransaction.findUnique({ where: { id: gTx1.id } });
-    expect(updatedBtx?.status).toBe('MATCHED');
-    expect(updatedGtx?.status).toBe('MATCHED');
+    expect(updatedBtx?.status).toBe('UNMATCHED');
+    expect(updatedGtx?.status).toBe('UNMATCHED');
 
     // Verify period status updated to PROCESSING
     const period = await prisma.reconciliationPeriod.findUnique({ where: { id: testPeriodId } });
