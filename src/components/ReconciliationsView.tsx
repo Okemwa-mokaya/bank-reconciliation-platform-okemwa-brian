@@ -13,6 +13,19 @@ export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ period
   const [matches, setMatches] = useState<ReconciliationMatch[]>([]);
   const [bankTransactions, setBankTransactions] = useState<BankTransaction[]>([]);
   const [glTransactions, setGlTransactions] = useState<GLTransaction[]>([]);
+  const [reviewCandidates, setReviewCandidates] = useState<{
+    bankTransactionId: string;
+    glTransactionId: string;
+    eligible: boolean;
+    totalCriteriaSatisfied: number;
+    strongCriteriaSatisfied: number;
+    criteriaSatisfied: string[];
+    criteriaFailed: string[];
+    confidenceScore: number;
+    breakdown: Record<string, unknown>;
+    matchingRuleId?: string | null;
+    matchingRuleName?: string | null;
+  }[]>([]);
   const [isLoadingMatches, setIsLoadingMatches] = useState(false);
   const [isProposingAuto, setIsProposingAuto] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
@@ -41,6 +54,7 @@ export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ period
       setMatches(res.matches);
       setBankTransactions(res.bankTransactions);
       setGlTransactions(res.glTransactions);
+      setReviewCandidates(res.reviewCandidates || []);
     } catch (err) {
       console.error('Failed to load period matches:', err);
     } finally {
@@ -556,6 +570,73 @@ export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ period
                   </div>
                 );
               })}
+                  </div>
+                )}
+              </section>
+
+              <section>
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="text-xs font-bold text-stone-900 uppercase tracking-wide">Needs Review</h4>
+                  <span className="text-[10px] font-semibold text-amber-700">{reviewCandidates.length} candidate(s)</span>
+                </div>
+                {reviewCandidates.length === 0 ? (
+                  <div className="py-5 text-center text-xs text-stone-500 italic bg-white rounded-lg border border-stone-200">
+                    No weak matching candidates require review.
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {reviewCandidates.map((candidate) => {
+                      const bankTx = bankTransactions.find((tx) => tx.id === candidate.bankTransactionId);
+                      const glTx = glTransactions.find((tx) => tx.id === candidate.glTransactionId);
+                      return (
+                        <div key={candidate.bankTransactionId} className="bg-amber-50/40 border border-amber-200 rounded-lg p-4 shadow-2xs text-xs space-y-3">
+                          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-100 pb-2">
+                            <div className="flex items-center gap-2">
+                              <AlertTriangle className="w-4 h-4 text-amber-600" />
+                              <span className="font-bold text-stone-900">POTENTIAL MATCH</span>
+                              <span className="text-[10px] px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200 font-semibold">
+                                NEEDS REVIEW
+                              </span>
+                            </div>
+                            <span className="text-[11px] text-stone-600">
+                              Confidence: <span className="font-mono font-bold text-stone-800">{Math.round(candidate.confidenceScore * 100)}%</span>
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div className="bg-white rounded border border-stone-200 p-3">
+                              <div className="font-semibold text-stone-800">Bank</div>
+                              <div className="text-stone-600 mt-1">{bankTx?.description || candidate.bankTransactionId}</div>
+                              <div className="font-mono text-stone-800 mt-1">{bankTx?.signedAmount ?? '—'}</div>
+                              <div className="text-stone-500">{bankTx?.transactionDate || '—'}</div>
+                            </div>
+                            <div className="bg-white rounded border border-stone-200 p-3">
+                              <div className="font-semibold text-stone-800">GL</div>
+                              <div className="text-stone-600 mt-1">{glTx?.narration || candidate.glTransactionId}</div>
+                              <div className="font-mono text-stone-800 mt-1">{glTx?.amount ?? '—'}</div>
+                              <div className="text-stone-500">{glTx?.transactionDate || '—'}</div>
+                            </div>
+                          </div>
+                          <div className="flex flex-wrap gap-2 text-[10px]">
+                            <span className="px-2 py-1 rounded bg-white border border-stone-200">
+                              Strong: <b>{candidate.strongCriteriaSatisfied}</b>
+                            </span>
+                            <span className="px-2 py-1 rounded bg-white border border-stone-200">
+                              Total satisfied: <b>{candidate.totalCriteriaSatisfied}</b>
+                            </span>
+                            {candidate.criteriaSatisfied.map((criterion) => (
+                              <span key={criterion} className="px-2 py-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                ✓ {criterion}
+                              </span>
+                            ))}
+                            {candidate.criteriaFailed.map((criterion) => (
+                              <span key={criterion} className="px-2 py-1 rounded bg-red-50 text-red-700 border border-red-200">
+                                ✕ {criterion}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </section>
