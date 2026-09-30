@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { BankAccount, ReconciliationPeriod, ReconciliationMatch } from '../types';
+import { BankAccount, ReconciliationPeriod, ReconciliationMatch, BankTransaction, GLTransaction } from '../types';
 import { api } from '../services/api';
 import { Calendar, CheckCircle2, Lock, Eye, GitMerge, FileCheck, Layers, AlertTriangle, Play, Sparkles, Plus, X } from 'lucide-react';
 
@@ -11,6 +11,8 @@ interface ReconciliationsViewProps {
 export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ periods, onRefresh }) => {
   const [selectedPeriod, setSelectedPeriod] = useState<ReconciliationPeriod | null>(null);
   const [matches, setMatches] = useState<ReconciliationMatch[]>([]);
+  const [bankTransactions, setBankTransactions] = useState<BankTransaction[]>([]);
+  const [glTransactions, setGlTransactions] = useState<GLTransaction[]>([]);
   const [isLoadingMatches, setIsLoadingMatches] = useState(false);
   const [isProposingAuto, setIsProposingAuto] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
@@ -37,6 +39,8 @@ export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ period
     try {
       const res = await api.getPeriodMatches(periodId);
       setMatches(res.matches);
+      setBankTransactions(res.bankTransactions);
+      setGlTransactions(res.glTransactions);
     } catch (err) {
       console.error('Failed to load period matches:', err);
     } finally {
