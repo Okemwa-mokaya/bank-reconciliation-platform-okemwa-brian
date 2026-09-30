@@ -175,7 +175,7 @@ const getPeriodMatchesHandler = async (req: any, res: any) => {
       return res.status(404).json({ error: 'Reconciliation period not found' });
     }
 
-    const [matches, bankTransactions, glTransactions] = await Promise.all([
+    const [matches, bankTransactions, glTransactions, reviewCandidates] = await Promise.all([
       prisma.reconciliationMatch.findMany({
         where: { reconciliationPeriodId: id },
         include: {
@@ -221,9 +221,42 @@ const getPeriodMatchesHandler = async (req: any, res: any) => {
         },
         orderBy: { transactionDate: 'desc' },
       }),
+      prisma.reconciliationReviewCandidate.findMany({
+        where: {
+          reconciliationPeriodId: id,
+          organizationId: orgId,
+          status: 'OPEN',
+        },
+        include: {
+          matchingRule: true,
+        },
+        orderBy: [
+          { confidenceScore: 'desc' },
+          { createdAt: 'desc' },
+        ],
+      }),
     ]);
 
-    res.json({ matches, bankTransactions, glTransactions });
+    const formattedReviewCandidates = reviewCandidates.map((candidate) => ({
+      bankTransactionId: candidate.bankTransactionId,
+      glTransactionId: candidate.glTransactionId,
+      eligible: false,
+      totalCriteriaSatisfied: candidate.totalCriteriaSatisfied,
+      strongCriteriaSatisfied: candidate.strongCriteriaSatisfied,
+      criteriaSatisfied: JSON.parse(candidate.criteriaSatisfied),
+      criteriaFailed: JSON.parse(candidate.criteriaFailed),
+      confidenceScore: Number(candidate.confidenceScore),
+      breakdown: JSON.parse(candidate.breakdown),
+      matchingRuleId: candidate.matchingRuleId,
+      matchingRuleName: candidate.matchingRule?.name ?? null,
+    }));
+
+    res.json({
+      matches,
+      bankTransactions,
+      glTransactions,
+      reviewCandidates: formattedReviewCandidates,
+    });
   } catch (error) {
     console.error('Error fetching matches:', error);
     res.status(500).json({ error: 'Failed to fetch matches' });
