@@ -341,44 +341,38 @@ describe('Auto-Matching Engine & Manual Override Hardening', () => {
     );
     expect(proposedMatch).toBeDefined();
 
-    // Proposal creation does not finalize the match. Transactions remain
-    // UNMATCHED until an explicit confirmation.
+    // Qualifying automatic matches are reconciled immediately.
     const updatedBtx = await prisma.bankTransaction.findUnique({ where: { id: bTx1.id } });
     const updatedGtx = await prisma.glTransaction.findUnique({ where: { id: gTx1.id } });
-    expect(updatedBtx?.status).toBe('UNMATCHED');
-    expect(updatedGtx?.status).toBe('UNMATCHED');
+    expect(updatedBtx?.status).toBe('MATCHED');
+    expect(updatedGtx?.status).toBe('MATCHED');
+
+    const confirmedMatch = await prisma.reconciliationMatch.findFirst({
+      where: {
+        reconciliationPeriodId: testPeriodId,
+        matchStatus: 'CONFIRMED',
+        bankTransactions: { some: { bankTransactionId: bTx1.id } },
+      },
+    });
+    expect(confirmedMatch).not.toBeNull();
 
     // Verify period status updated to PROCESSING
     const period = await prisma.reconciliationPeriod.findUnique({ where: { id: testPeriodId } });
     expect(period?.status).toBe('PROCESSING');
   });
 
-  it('5. Confirm proposed match transitions match status to CONFIRMED', async () => {
-    // Locate proposed match created in test 4
-    const proposed = await prisma.reconciliationMatch.findFirst({
+  it('5. Qualifying automatic matches are already confirmed and do not require manual confirmation', async () => {
+    const confirmed = await prisma.reconciliationMatch.findFirst({
       where: {
         reconciliationPeriodId: testPeriodId,
-        matchStatus: 'PROPOSED',
+        matchStatus: 'CONFIRMED',
+        bankTransactions: { some: { bankTransactionId: bTx1.id } },
       },
     });
-    expect(proposed).not.toBeNull();
 
-    const req = {
-      organization: { id: testOrgId },
-      params: { id: proposed!.id },
-      user: { id: testUserId, email: 'accountant@acme.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
-    };
-    const res = createMockRes();
-
-    await confirmMatchHandler(req as any, res as any);
-
-    expect(res.statusCode).toBe(200);
-    expect(res.jsonData.success).toBe(true);
-    expect(res.jsonData.match.matchStatus).toBe('CONFIRMED');
-
-    // Check database
-    const confirmed = await prisma.reconciliationMatch.findUnique({ where: { id: proposed!.id } });
-    expect(confirmed?.matchStatus).toBe('CONFIRMED');
+    expect(confirmed).not.toBeNull();
+    expect(confirmed?.createdByType).toBe('SYSTEM');
+    expect(confirmed?.isManualOverride).toBe(false);
   });
 
   it('6. Propose auto matches rejects closed or locked periods', async () => {
