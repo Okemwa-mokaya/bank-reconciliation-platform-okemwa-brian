@@ -69,7 +69,7 @@ export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ period
       setIsLoadingAccounts(true);
       try {
         const res = await api.getBankAccounts();
-        setBankAccounts(res.accounts.filter((account) => account.isActive));
+        setBankAccounts(res.accounts.filter((account) => account.status === 'ACTIVE'));
       } catch (err: any) {
         console.error('Failed to load bank accounts:', err);
         setCreateError(err.message || 'Failed to load bank accounts.');
@@ -694,3 +694,4 @@ export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ period
     </div>
   );
 };
+
