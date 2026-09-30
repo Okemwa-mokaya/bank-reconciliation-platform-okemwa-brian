@@ -175,21 +175,55 @@ const getPeriodMatchesHandler = async (req: any, res: any) => {
       return res.status(404).json({ error: 'Reconciliation period not found' });
     }
 
-    const matches = await prisma.reconciliationMatch.findMany({
-      where: { reconciliationPeriodId: id },
-      include: {
-        matchingRule: true,
-        bankTransactions: {
-          include: { bankTransaction: true },
+    const [matches, bankTransactions, glTransactions] = await Promise.all([
+      prisma.reconciliationMatch.findMany({
+        where: { reconciliationPeriodId: id },
+        include: {
+          matchingRule: true,
+          bankTransactions: {
+            include: { bankTransaction: true },
+          },
+          glTransactions: {
+            include: { glTransaction: true },
+          },
         },
-        glTransactions: {
-          include: { glTransaction: true },
+        orderBy: { createdAt: 'desc' },
+      }),
+      prisma.bankTransaction.findMany({
+        where: {
+          organizationId: orgId,
+          bankAccountId: period.bankAccountId,
+          transactionDate: {
+            gte: period.periodStart,
+            lte: period.periodEnd,
+          },
         },
-      },
-      orderBy: { createdAt: 'desc' },
-    });
+        include: {
+          matchItems: {
+            include: { match: true },
+          },
+        },
+        orderBy: { transactionDate: 'desc' },
+      }),
+      prisma.glTransaction.findMany({
+        where: {
+          organizationId: orgId,
+          bankAccountId: period.bankAccountId,
+          transactionDate: {
+            gte: period.periodStart,
+            lte: period.periodEnd,
+          },
+        },
+        include: {
+          matchItems: {
+            include: { match: true },
+          },
+        },
+        orderBy: { transactionDate: 'desc' },
+      }),
+    ]);
 
-    res.json({ matches });
+    res.json({ matches, bankTransactions, glTransactions });
   } catch (error) {
     console.error('Error fetching matches:', error);
     res.status(500).json({ error: 'Failed to fetch matches' });
