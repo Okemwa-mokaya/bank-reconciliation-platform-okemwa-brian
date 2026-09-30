@@ -1034,6 +1034,7 @@ export const proposeAutoMatchesHandler = async (req: any, res: any) => {
     const matchedBankTxIds = new Set<string>();
     const matchedGlTxIds = new Set<string>();
     const proposedMatches: any[] = [];
+    const reviewCandidates = new Map<string, any>();
 
     // If matching rules exist, iterate through them in priority order; otherwise use default rule evaluation
     const rulesToEvaluate = matchingRules.length > 0 ? matchingRules : [null];
@@ -1071,6 +1072,30 @@ export const proposeAutoMatchesHandler = async (req: any, res: any) => {
             minTotalCriteria: minTotal,
             minStrongCriteria: minStrong,
           });
+
+          // Retain the strongest nonqualifying candidate for manual review without creating a match.
+          if (!evalSummary.eligible && evalSummary.organizationIsolated) {
+            const existing = reviewCandidates.get(bTx.id);
+            const candidateScore = evalSummary.strongCriteriaSatisfied * 100 + evalSummary.totalCriteriaSatisfied * 10 + evalSummary.confidenceScore;
+            const existingScore = existing
+              ? existing.strongCriteriaSatisfied * 100 + existing.totalCriteriaSatisfied * 10 + existing.confidenceScore
+              : -1;
+            if (candidateScore > existingScore) {
+              reviewCandidates.set(bTx.id, {
+                bankTransactionId: bTx.id,
+                glTransactionId: gTx.id,
+                eligible: false,
+                totalCriteriaSatisfied: evalSummary.totalCriteriaSatisfied,
+                strongCriteriaSatisfied: evalSummary.strongCriteriaSatisfied,
+                criteriaSatisfied: evalSummary.criteriaSatisfied,
+                criteriaFailed: evalSummary.criteriaFailed,
+                confidenceScore: evalSummary.confidenceScore,
+                breakdown: evalSummary.breakdown,
+                matchingRuleId: rule?.id || null,
+                matchingRuleName: rule?.name || null,
+              });
+            }
+          }
 
           // Check if eligible and meets all required criteria of the rule
           if (evalSummary.eligible) {
@@ -1219,6 +1244,7 @@ export const proposeAutoMatchesHandler = async (req: any, res: any) => {
       success: true,
       count: proposedMatches.length,
       matches: proposedMatches,
+      reviewCandidates: Array.from(reviewCandidates.values()),
       message: `Successfully automatically reconciled ${proposedMatches.length} qualifying match(es). Nonqualifying transactions remain available for manual review.`,
     });
   } catch (error) {
