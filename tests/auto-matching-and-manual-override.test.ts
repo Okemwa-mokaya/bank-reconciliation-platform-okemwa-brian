@@ -48,18 +48,31 @@ describe('Auto-Matching Engine & Manual Override Hardening', () => {
     testBankAccountId = org!.bankAccounts[0].id;
     testUserId = org!.users[0].id;
 
-    // Create a dedicated reconciliation period for this test suite
-    const period = await prisma.reconciliationPeriod.create({
-      data: {
+    // Locate or create the dedicated November 2026 reconciliation period for this test suite
+    let period = await prisma.reconciliationPeriod.findFirst({
+      where: {
         organizationId: testOrgId,
         bankAccountId: testBankAccountId,
         periodStart: new Date('2026-11-01'),
         periodEnd: new Date('2026-11-30'),
-        status: 'NOT_STARTED',
+        status: { in: ['NOT_STARTED', 'PROCESSING'] },
         isLocked: false,
-        preparedById: testUserId,
       },
     });
+
+    if (!period) {
+      period = await prisma.reconciliationPeriod.create({
+        data: {
+          organizationId: testOrgId,
+          bankAccountId: testBankAccountId,
+          periodStart: new Date('2026-11-01'),
+          periodEnd: new Date('2026-11-30'),
+          status: 'NOT_STARTED',
+          isLocked: false,
+          preparedById: testUserId,
+        },
+      });
+    }
 
     testPeriodId = period.id;
   });
