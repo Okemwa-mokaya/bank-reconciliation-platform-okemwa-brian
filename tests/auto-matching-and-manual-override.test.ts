@@ -48,29 +48,19 @@ describe('Auto-Matching Engine & Manual Override Hardening', () => {
     testBankAccountId = org!.bankAccounts[0].id;
     testUserId = org!.users[0].id;
 
-    // Locate or create a dedicated reconciliation period for this test suite
-    let period = await prisma.reconciliationPeriod.findFirst({
-      where: {
+    // Create a dedicated reconciliation period for this test suite
+    const period = await prisma.reconciliationPeriod.create({
+      data: {
         organizationId: testOrgId,
         bankAccountId: testBankAccountId,
-        status: { in: ['NOT_STARTED', 'PROCESSING'] },
+        periodStart: new Date('2026-11-01'),
+        periodEnd: new Date('2026-11-30'),
+        status: 'NOT_STARTED',
         isLocked: false,
+        preparedById: testUserId,
       },
     });
 
-    if (!period) {
-      period = await prisma.reconciliationPeriod.create({
-        data: {
-          organizationId: testOrgId,
-          bankAccountId: testBankAccountId,
-          periodStart: new Date('2026-11-01'),
-          periodEnd: new Date('2026-11-30'),
-          status: 'NOT_STARTED',
-          isLocked: false,
-          preparedById: testUserId,
-        },
-      });
-    }
     testPeriodId = period.id;
   });
 
@@ -286,7 +276,7 @@ describe('Auto-Matching Engine & Manual Override Hardening', () => {
       data: {
         organizationId: testOrgId,
         bankAccountId: testBankAccountId,
-        transactionDate: new Date('2026-09-12'),
+        transactionDate: new Date('2026-11-12'),
         description: `Automated Payroll ${nonce}`,
         referenceNumber: `PAY-BATCH-${nonce}`,
         accountNumber: '1111-OP',
@@ -305,7 +295,7 @@ describe('Auto-Matching Engine & Manual Override Hardening', () => {
       data: {
         organizationId: testOrgId,
         bankAccountId: testBankAccountId,
-        transactionDate: new Date('2026-09-12'),
+        transactionDate: new Date('2026-11-12'),
         narration: `Automated Payroll ${nonce}`,
         referenceNumber: `PAY-BATCH-${nonce}`,
         accountNumber: '1111-OP',
