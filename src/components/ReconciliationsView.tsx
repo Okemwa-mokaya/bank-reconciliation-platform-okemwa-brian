@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { ReconciliationPeriod, ReconciliationMatch } from '../types';
+import { BankAccount, ReconciliationPeriod, ReconciliationMatch, BankTransaction, GLTransaction } from '../types';
 import { api } from '../services/api';
-import { Calendar, CheckCircle2, Lock, Eye, GitMerge, FileCheck, Layers, AlertTriangle, Play, Sparkles } from 'lucide-react';
+import { Calendar, CheckCircle2, Lock, Eye, GitMerge, FileCheck, Layers, AlertTriangle, Play, Sparkles, Plus, X } from 'lucide-react';
 
 interface ReconciliationsViewProps {
   periods: ReconciliationPeriod[];
@@ -11,9 +11,35 @@ interface ReconciliationsViewProps {
 export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ periods, onRefresh }) => {
   const [selectedPeriod, setSelectedPeriod] = useState<ReconciliationPeriod | null>(null);
   const [matches, setMatches] = useState<ReconciliationMatch[]>([]);
+  const [bankTransactions, setBankTransactions] = useState<BankTransaction[]>([]);
+  const [glTransactions, setGlTransactions] = useState<GLTransaction[]>([]);
+  const [reviewCandidates, setReviewCandidates] = useState<{
+    bankTransactionId: string;
+    glTransactionId: string;
+    eligible: boolean;
+    totalCriteriaSatisfied: number;
+    strongCriteriaSatisfied: number;
+    criteriaSatisfied: string[];
+    criteriaFailed: string[];
+    confidenceScore: number;
+    breakdown: Record<string, unknown>;
+    matchingRuleId?: string | null;
+    matchingRuleName?: string | null;
+  }[]>([]);
   const [isLoadingMatches, setIsLoadingMatches] = useState(false);
   const [isProposingAuto, setIsProposingAuto] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+
+  const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]);
+  const [showCreateForm, setShowCreateForm] = useState(false);
+  const [isLoadingAccounts, setIsLoadingAccounts] = useState(false);
+  const [isCreatingPeriod, setIsCreatingPeriod] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [createForm, setCreateForm] = useState({
+    bankAccountId: '',
+    periodStart: '',
+    periodEnd: '',
+  });
 
   useEffect(() => {
     if (selectedPeriod) {
@@ -26,10 +52,74 @@ export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ period
     try {
       const res = await api.getPeriodMatches(periodId);
       setMatches(res.matches);
+      setBankTransactions(res.bankTransactions);
+      setGlTransactions(res.glTransactions);
+      setReviewCandidates(res.reviewCandidates || []);
     } catch (err) {
       console.error('Failed to load period matches:', err);
     } finally {
       setIsLoadingMatches(false);
+    }
+  };
+
+  const openCreateForm = async () => {
+    setCreateError(null);
+    setShowCreateForm(true);
+    if (bankAccounts.length === 0) {
+      setIsLoadingAccounts(true);
+      try {
+        const res = await api.getBankAccounts();
+        setBankAccounts(res.accounts.filter((account) => account.status === 'ACTIVE'));
+      } catch (err: any) {
+        console.error('Failed to load bank accounts:', err);
+        setCreateError(err.message || 'Failed to load bank accounts.');
+      } finally {
+        setIsLoadingAccounts(false);
+      }
+    }
+  };
+
+  const handleCreatePeriod = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setCreateError(null);
+
+    if (!createForm.bankAccountId || !createForm.periodStart || !createForm.periodEnd) {
+      setCreateError('Bank account, period start date, and period end date are required.');
+      return;
+    }
+
+    const start = new Date(`${createForm.periodStart}T00:00:00`);
+    const end = new Date(`${createForm.periodEnd}T23:59:59`);
+
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+      setCreateError('Please provide valid period dates.');
+      return;
+    }
+
+    if (start > end) {
+      setCreateError('Period start date cannot be after the period end date.');
+      return;
+    }
+
+    setIsCreatingPeriod(true);
+    try {
+      const res = await api.createReconciliationPeriod({
+        bankAccountId: createForm.bankAccountId,
+        periodStart: start.toISOString(),
+        periodEnd: end.toISOString(),
+      });
+
+      const createdPeriod = res.period;
+      setShowCreateForm(false);
+      setCreateForm({ bankAccountId: '', periodStart: '', periodEnd: '' });
+      setActionMessage('Reconciliation period created successfully.');
+      setSelectedPeriod(createdPeriod);
+      onRefresh();
+    } catch (err: any) {
+      console.error('Failed to create reconciliation period:', err);
+      setCreateError(err.message || 'Failed to create reconciliation period.');
+    } finally {
+      setIsCreatingPeriod(false);
     }
   };
 
@@ -93,18 +183,118 @@ export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ period
     <div className="space-y-6">
       {/* Header */}
       <div>
-        <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="text-lg font-bold text-stone-900">Reconciliation Periods & Multi-Item Matches</h2>
             <p className="text-xs text-stone-500">
               Reconciliation lifecycle tracking, approval hierarchy, and topological match relationships (1:1, 1:Many, Many:Many)
             </p>
           </div>
-          <span className="inline-flex items-center px-2.5 py-1 rounded-md text-[11px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-300">
-            Phase 3 Production Complete: Criteria Engine & Automatic Reconciliation Execution Active
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="inline-flex items-center px-2.5 py-1 rounded-md text-[11px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-300">
+              Phase 3 Production Complete: Criteria Engine & Automatic Reconciliation Execution Active
+            </span>
+            <button
+              type="button"
+              onClick={openCreateForm}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-stone-900 text-white text-xs font-semibold hover:bg-stone-800 transition-colors"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              New Reconciliation Period
+            </button>
+          </div>
         </div>
       </div>
+
+      {actionMessage && (
+        <div className="text-xs bg-emerald-50 border border-emerald-200 text-emerald-800 px-3 py-2 rounded-lg flex items-center justify-between">
+          <span className="inline-flex items-center gap-1.5"><CheckCircle2 className="w-3.5 h-3.5" />{actionMessage}</span>
+          <button onClick={() => setActionMessage(null)} className="text-emerald-700 hover:text-emerald-950 font-bold ml-2">×</button>
+        </div>
+      )}
+
+      {/* Create Period Form */}
+      {showCreateForm && (
+        <div className="bg-white border border-stone-300 rounded-xl p-5 shadow-sm">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h3 className="text-sm font-bold text-stone-900">Create Reconciliation Period</h3>
+              <p className="text-xs text-stone-500 mt-0.5">Define the bank account and date range that will be evaluated by the reconciliation engine.</p>
+            </div>
+            <button type="button" onClick={() => { setShowCreateForm(false); setCreateError(null); }} className="p-1 text-stone-400 hover:text-stone-800">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <form onSubmit={handleCreatePeriod} className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+            <label className="block">
+              <span className="block text-[10px] font-semibold uppercase tracking-wider text-stone-500 mb-1.5">Bank Account</span>
+              <select
+                value={createForm.bankAccountId}
+                onChange={(e) => setCreateForm((current) => ({ ...current, bankAccountId: e.target.value }))}
+                disabled={isLoadingAccounts || isCreatingPeriod}
+                className="w-full rounded-lg border border-stone-300 bg-white px-3 py-2 text-xs text-stone-800 focus:outline-none focus:ring-2 focus:ring-stone-400"
+              >
+                <option value="">{isLoadingAccounts ? 'Loading accounts...' : 'Select bank account'}</option>
+                {bankAccounts.map((account) => (
+                  <option key={account.id} value={account.id}>
+                    {account.bank.name} — {account.accountName} ({account.accountNumber})
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="block">
+              <span className="block text-[10px] font-semibold uppercase tracking-wider text-stone-500 mb-1.5">Period Start</span>
+              <div className="relative">
+                <Calendar className="absolute left-3 top-2.5 w-3.5 h-3.5 text-stone-400" />
+                <input
+                  type="date"
+                  value={createForm.periodStart}
+                  onChange={(e) => setCreateForm((current) => ({ ...current, periodStart: e.target.value }))}
+                  disabled={isCreatingPeriod}
+                  className="w-full rounded-lg border border-stone-300 bg-white pl-9 pr-3 py-2 text-xs text-stone-800 focus:outline-none focus:ring-2 focus:ring-stone-400"
+                />
+              </div>
+            </label>
+
+            <label className="block">
+              <span className="block text-[10px] font-semibold uppercase tracking-wider text-stone-500 mb-1.5">Period End</span>
+              <div className="relative">
+                <Calendar className="absolute left-3 top-2.5 w-3.5 h-3.5 text-stone-400" />
+                <input
+                  type="date"
+                  value={createForm.periodEnd}
+                  min={createForm.periodStart || undefined}
+                  onChange={(e) => setCreateForm((current) => ({ ...current, periodEnd: e.target.value }))}
+                  disabled={isCreatingPeriod}
+                  className="w-full rounded-lg border border-stone-300 bg-white pl-9 pr-3 py-2 text-xs text-stone-800 focus:outline-none focus:ring-2 focus:ring-stone-400"
+                />
+              </div>
+            </label>
+
+            <button
+              type="submit"
+              disabled={isCreatingPeriod || isLoadingAccounts || bankAccounts.length === 0}
+              className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isCreatingPeriod ? 'Creating...' : 'Create Period'}
+            </button>
+          </form>
+
+          {createError && (
+            <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
+              {createError}
+            </div>
+          )}
+
+          {!isLoadingAccounts && bankAccounts.length === 0 && !createError && (
+            <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              No active bank accounts are available for this organization. Create or activate a bank account before starting a reconciliation period.
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Periods Table */}
       <div className="bg-white border border-stone-200 rounded-xl overflow-hidden shadow-2xs">
@@ -233,14 +423,21 @@ export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ period
           )}
 
           {isLoadingMatches ? (
-            <div className="py-8 text-center text-xs text-stone-500">Loading period matches...</div>
-          ) : matches.length === 0 ? (
-            <div className="py-8 text-center text-xs text-stone-500 italic bg-white rounded-lg border border-stone-200">
-              No matches recorded for this period yet.
-            </div>
+            <div className="py-8 text-center text-xs text-stone-500">Loading period transactions and matches...</div>
           ) : (
-            <div className="space-y-3">
-              {matches.map((match) => {
+            <div className="space-y-5">
+              <section>
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="text-xs font-bold text-stone-900 uppercase tracking-wide">Automatically Reconciled</h4>
+                  <span className="text-[10px] font-semibold text-emerald-700">{matches.filter((match) => match.matchStatus === 'CONFIRMED').length} confirmed match(es)</span>
+                </div>
+                {matches.length === 0 ? (
+                  <div className="py-5 text-center text-xs text-stone-500 italic bg-white rounded-lg border border-stone-200">
+                    No matches recorded for this period yet.
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {matches.map((match) => {
                 const isOverride = match.isManualOverride || match.explanation?.includes('[MANUAL_OVERRIDE]');
 
                 return (
@@ -373,6 +570,123 @@ export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ period
                   </div>
                 );
               })}
+                  </div>
+                )}
+              </section>
+
+              <section>
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="text-xs font-bold text-stone-900 uppercase tracking-wide">Needs Review</h4>
+                  <span className="text-[10px] font-semibold text-amber-700">{reviewCandidates.length} candidate(s)</span>
+                </div>
+                {reviewCandidates.length === 0 ? (
+                  <div className="py-5 text-center text-xs text-stone-500 italic bg-white rounded-lg border border-stone-200">
+                    No weak matching candidates require review.
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {reviewCandidates.map((candidate) => {
+                      const bankTx = bankTransactions.find((tx) => tx.id === candidate.bankTransactionId);
+                      const glTx = glTransactions.find((tx) => tx.id === candidate.glTransactionId);
+                      return (
+                        <div key={candidate.bankTransactionId} className="bg-amber-50/40 border border-amber-200 rounded-lg p-4 shadow-2xs text-xs space-y-3">
+                          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-100 pb-2">
+                            <div className="flex items-center gap-2">
+                              <AlertTriangle className="w-4 h-4 text-amber-600" />
+                              <span className="font-bold text-stone-900">POTENTIAL MATCH</span>
+                              <span className="text-[10px] px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200 font-semibold">
+                                NEEDS REVIEW
+                              </span>
+                            </div>
+                            <span className="text-[11px] text-stone-600">
+                              Confidence: <span className="font-mono font-bold text-stone-800">{Math.round(candidate.confidenceScore * 100)}%</span>
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div className="bg-white rounded border border-stone-200 p-3">
+                              <div className="font-semibold text-stone-800">Bank</div>
+                              <div className="text-stone-600 mt-1">{bankTx?.description || candidate.bankTransactionId}</div>
+                              <div className="font-mono text-stone-800 mt-1">{bankTx?.signedAmount ?? '—'}</div>
+                              <div className="text-stone-500">{bankTx?.transactionDate || '—'}</div>
+                            </div>
+                            <div className="bg-white rounded border border-stone-200 p-3">
+                              <div className="font-semibold text-stone-800">GL</div>
+                              <div className="text-stone-600 mt-1">{glTx?.narration || candidate.glTransactionId}</div>
+                              <div className="font-mono text-stone-800 mt-1">{glTx?.amount ?? '—'}</div>
+                              <div className="text-stone-500">{glTx?.transactionDate || '—'}</div>
+                            </div>
+                          </div>
+                          <div className="flex flex-wrap gap-2 text-[10px]">
+                            <span className="px-2 py-1 rounded bg-white border border-stone-200">
+                              Strong: <b>{candidate.strongCriteriaSatisfied}</b>
+                            </span>
+                            <span className="px-2 py-1 rounded bg-white border border-stone-200">
+                              Total satisfied: <b>{candidate.totalCriteriaSatisfied}</b>
+                            </span>
+                            {candidate.criteriaSatisfied.map((criterion) => (
+                              <span key={criterion} className="px-2 py-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                ✓ {criterion}
+                              </span>
+                            ))}
+                            {candidate.criteriaFailed.map((criterion) => (
+                              <span key={criterion} className="px-2 py-1 rounded bg-red-50 text-red-700 border border-red-200">
+                                ✕ {criterion}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+
+              {[
+                { title: 'Unmatched Bank Transactions', items: bankTransactions.filter((tx) => tx.status === 'UNMATCHED'), type: 'BANK' },
+                { title: 'Unmatched GL Transactions', items: glTransactions.filter((tx) => tx.status === 'UNMATCHED'), type: 'GL' },
+                { title: 'Partially Matched Bank Transactions', items: bankTransactions.filter((tx) => tx.status === 'PARTIALLY_MATCHED'), type: 'BANK' },
+                { title: 'Partially Matched GL Transactions', items: glTransactions.filter((tx) => tx.status === 'PARTIALLY_MATCHED'), type: 'GL' },
+              ].map((section) => (
+                <section key={section.title}>
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-xs font-bold text-stone-900 uppercase tracking-wide">{section.title}</h4>
+                    <span className="text-[10px] font-semibold text-stone-500">{section.items.length}</span>
+                  </div>
+                  {section.items.length === 0 ? (
+                    <div className="py-4 text-center text-xs text-stone-400 bg-white rounded-lg border border-stone-200">
+                      None
+                    </div>
+                  ) : (
+                    <div className="bg-white border border-stone-200 rounded-lg divide-y divide-stone-100">
+                      {section.items.map((tx) => (
+                        <div key={tx.id} className="px-4 py-3 text-xs">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="font-medium text-stone-900">
+                              {section.type === 'BANK'
+                                ? (tx as BankTransaction).description
+                                : (tx as GLTransaction).narration}
+                            </div>
+                            <span className="font-mono font-semibold text-stone-800">
+                              {formatCurrency(
+                                Math.abs(section.type === 'BANK' ? (tx as BankTransaction).signedAmount : (tx as GLTransaction).amount),
+                                tx.currency
+                              )}
+                            </span>
+                          </div>
+                          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-stone-500">
+                            <span>{formatDate(tx.transactionDate)}</span>
+                            <span>Status: {tx.status}</span>
+                            {tx.referenceNumber && <span>Ref: {tx.referenceNumber}</span>}
+                            {section.type === 'GL' && (tx as GLTransaction).journalNumber && (
+                              <span>Journal: {(tx as GLTransaction).journalNumber}</span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              ))}
             </div>
           )}
         </div>
@@ -380,3 +694,4 @@ export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ period
     </div>
   );
 };
+

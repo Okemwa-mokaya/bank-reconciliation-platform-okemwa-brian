@@ -75,8 +75,6 @@ const createPeriodHandler = async (req: any, res: any) => {
         periodEnd: new Date(validated.periodEnd),
         status: 'NOT_STARTED',
         isLocked: false,
-        preparedById: req.user?.id,
-        preparedAt: new Date(),
       },
       include: {
         bankAccount: { include: { bank: true } },
@@ -177,21 +175,88 @@ const getPeriodMatchesHandler = async (req: any, res: any) => {
       return res.status(404).json({ error: 'Reconciliation period not found' });
     }
 
-    const matches = await prisma.reconciliationMatch.findMany({
-      where: { reconciliationPeriodId: id },
-      include: {
-        matchingRule: true,
-        bankTransactions: {
-          include: { bankTransaction: true },
+    const [matches, bankTransactions, glTransactions, reviewCandidates] = await Promise.all([
+      prisma.reconciliationMatch.findMany({
+        where: { reconciliationPeriodId: id },
+        include: {
+          matchingRule: true,
+          bankTransactions: {
+            include: { bankTransaction: true },
+          },
+          glTransactions: {
+            include: { glTransaction: true },
+          },
         },
-        glTransactions: {
-          include: { glTransaction: true },
+        orderBy: { createdAt: 'desc' },
+      }),
+      prisma.bankTransaction.findMany({
+        where: {
+          organizationId: orgId,
+          bankAccountId: period.bankAccountId,
+          transactionDate: {
+            gte: period.periodStart,
+            lte: period.periodEnd,
+          },
         },
-      },
-      orderBy: { createdAt: 'desc' },
-    });
+        include: {
+          matchItems: {
+            include: { match: true },
+          },
+        },
+        orderBy: { transactionDate: 'desc' },
+      }),
+      prisma.glTransaction.findMany({
+        where: {
+          organizationId: orgId,
+          bankAccountId: period.bankAccountId,
+          transactionDate: {
+            gte: period.periodStart,
+            lte: period.periodEnd,
+          },
+        },
+        include: {
+          matchItems: {
+            include: { match: true },
+          },
+        },
+        orderBy: { transactionDate: 'desc' },
+      }),
+      prisma.reconciliationReviewCandidate.findMany({
+        where: {
+          reconciliationPeriodId: id,
+          organizationId: orgId,
+          status: 'OPEN',
+        },
+        include: {
+          matchingRule: true,
+        },
+        orderBy: [
+          { confidenceScore: 'desc' },
+          { createdAt: 'desc' },
+        ],
+      }),
+    ]);
 
-    res.json({ matches });
+    const formattedReviewCandidates = reviewCandidates.map((candidate) => ({
+      bankTransactionId: candidate.bankTransactionId,
+      glTransactionId: candidate.glTransactionId,
+      eligible: false,
+      totalCriteriaSatisfied: candidate.totalCriteriaSatisfied,
+      strongCriteriaSatisfied: candidate.strongCriteriaSatisfied,
+      criteriaSatisfied: JSON.parse(candidate.criteriaSatisfied),
+      criteriaFailed: JSON.parse(candidate.criteriaFailed),
+      confidenceScore: Number(candidate.confidenceScore),
+      breakdown: JSON.parse(candidate.breakdown),
+      matchingRuleId: candidate.matchingRuleId,
+      matchingRuleName: candidate.matchingRule?.name ?? null,
+    }));
+
+    res.json({
+      matches,
+      bankTransactions,
+      glTransactions,
+      reviewCandidates: formattedReviewCandidates,
+    });
   } catch (error) {
     console.error('Error fetching matches:', error);
     res.status(500).json({ error: 'Failed to fetch matches' });
@@ -768,20 +833,36 @@ reconciliationRouter.post('/periods/:id/matches', requirePermission('manually_ma
 export const unmatchHandler = async (req: any, res: any) => {
   try {
     const orgId = req.organization!.id;
-    const { id: periodId } = req.params;
-    const { matchId } = req.body;
+    const { id } = req.params;
+    const bodyMatchId = req.body?.matchId;
 
-    if (!matchId) {
-      return res.status(400).json({ error: 'Missing matchId in request body' });
-    }
+    // Support both endpoint shapes:
+    // POST /reconciliations/:matchId/unmatch
+    // POST /reconciliations/periods/:periodId/unmatch { matchId }
+    const matchId = bodyMatchId || id;
 
-    const period = await prisma.reconciliationPeriod.findFirst({
-      where: { id: periodId, organizationId: orgId },
+    const initialMatch = await prisma.reconciliationMatch.findFirst({
+      where: { id: matchId },
+      include: { reconciliationPeriod: true },
     });
 
-    if (!period) {
-      return res.status(404).json({ error: 'Reconciliation period not found' });
+    if (!initialMatch) {
+      return res.status(404).json({ error: 'Reconciliation match not found' });
     }
+
+    // Direct handler tests and some internal callers may provide a lightweight
+    // match record without the included period. Resolve the period explicitly
+    // in that case while preserving organization isolation.
+    const period = initialMatch.reconciliationPeriod ||
+      await prisma.reconciliationPeriod.findFirst({
+        where: { id: initialMatch.reconciliationPeriodId, organizationId: orgId },
+      });
+
+    if (!period || period.organizationId !== orgId) {
+      return res.status(404).json({ error: 'Reconciliation match not found' });
+    }
+
+    const periodId = initialMatch.reconciliationPeriodId;
 
     if (period.isLocked || period.status === 'CLOSED') {
       return res.status(403).json({ error: 'Cannot unmatch on a locked or closed reconciliation period' });
@@ -866,8 +947,17 @@ export const unmatchHandler = async (req: any, res: any) => {
         });
       }
 
-      // 4. Delete match record
-      await tx.reconciliationMatch.delete({ where: { id: matchId } });
+      // 4. Preserve the match record for audit/history.
+      // An unmatch reverses the active match but must not erase the reconciliation record.
+      await tx.reconciliationMatch.update({
+        where: { id: matchId },
+        data: {
+          matchStatus: 'UNMATCHED',
+          explanation: match.explanation
+            ? `${match.explanation} (Unmatched by ${req.user?.email || 'user'})`
+            : `Unmatched by ${req.user?.email || 'user'}`,
+        },
+      });
     });
 
     await recordAuditEvent({
@@ -944,6 +1034,10 @@ export const proposeAutoMatchesHandler = async (req: any, res: any) => {
       where: {
         organizationId: orgId,
         bankAccountId: period.bankAccountId,
+        transactionDate: {
+          gte: period.periodStart,
+          lte: period.periodEnd,
+        },
         status: { in: ['UNMATCHED', 'PARTIALLY_MATCHED'] },
       },
       orderBy: { transactionDate: 'asc' },
@@ -953,6 +1047,10 @@ export const proposeAutoMatchesHandler = async (req: any, res: any) => {
       where: {
         organizationId: orgId,
         bankAccountId: period.bankAccountId,
+        transactionDate: {
+          gte: period.periodStart,
+          lte: period.periodEnd,
+        },
         status: { in: ['UNMATCHED', 'PARTIALLY_MATCHED'] },
       },
       orderBy: { transactionDate: 'asc' },
@@ -977,6 +1075,7 @@ export const proposeAutoMatchesHandler = async (req: any, res: any) => {
     const matchedBankTxIds = new Set<string>();
     const matchedGlTxIds = new Set<string>();
     const proposedMatches: any[] = [];
+    const reviewCandidates = new Map<string, any>();
 
     // If matching rules exist, iterate through them in priority order; otherwise use default rule evaluation
     const rulesToEvaluate = matchingRules.length > 0 ? matchingRules : [null];
@@ -1015,16 +1114,49 @@ export const proposeAutoMatchesHandler = async (req: any, res: any) => {
             minStrongCriteria: minStrong,
           });
 
-          // Check if eligible and meets all required criteria of the rule
-          if (evalSummary.eligible) {
-            let passesRequired = true;
-            for (const reqCrit of requiredCriteriaCodes) {
-              if (!evalSummary.criteriaSatisfied.includes(reqCrit as any)) {
-                passesRequired = false;
-                break;
-              }
+          // Check whether the candidate satisfies all required criteria of the rule.
+          let passesRequired = true;
+          for (const reqCrit of requiredCriteriaCodes) {
+            if (!evalSummary.criteriaSatisfied.includes(reqCrit as any)) {
+              passesRequired = false;
+              break;
             }
+          }
 
+          // Retain the strongest meaningful nonqualifying candidate for manual review.
+          // Candidates are persisted below so the review queue survives the request.
+          if ((!evalSummary.eligible || !passesRequired) &&
+              evalSummary.organizationIsolated &&
+              evalSummary.totalCriteriaSatisfied > 0) {
+            const existing = reviewCandidates.get(bTx.id);
+            const candidateScore =
+              evalSummary.strongCriteriaSatisfied * 100 +
+              evalSummary.totalCriteriaSatisfied * 10 +
+              evalSummary.confidenceScore;
+            const existingScore = existing
+              ? existing.strongCriteriaSatisfied * 100 +
+                existing.totalCriteriaSatisfied * 10 +
+                existing.confidenceScore
+              : -1;
+            if (candidateScore > existingScore) {
+              reviewCandidates.set(bTx.id, {
+                bankTransactionId: bTx.id,
+                glTransactionId: gTx.id,
+                eligible: evalSummary.eligible,
+                totalCriteriaSatisfied: evalSummary.totalCriteriaSatisfied,
+                strongCriteriaSatisfied: evalSummary.strongCriteriaSatisfied,
+                criteriaSatisfied: evalSummary.criteriaSatisfied,
+                criteriaFailed: evalSummary.criteriaFailed,
+                confidenceScore: evalSummary.confidenceScore,
+                breakdown: evalSummary.breakdown,
+                matchingRuleId: rule?.id || null,
+                matchingRuleName: rule?.name || null,
+              });
+            }
+          }
+
+          // Only qualifying candidates may be automatically reconciled.
+          if (evalSummary.eligible) {
             if (!passesRequired) continue;
 
             // Calculate allocations
@@ -1059,12 +1191,12 @@ export const proposeAutoMatchesHandler = async (req: any, res: any) => {
                 data: {
                   reconciliationPeriodId: periodId,
                   matchType: 'ONE_TO_ONE',
-                  matchStatus: 'PROPOSED',
+                  matchStatus: 'CONFIRMED',
                   matchingRuleId: rule?.id || null,
                   confidenceScore: new Prisma.Decimal(evalSummary.confidenceScore),
                   criteriaMatched: JSON.stringify(evalSummary.criteriaSatisfied),
                   tolerancesApplied: JSON.stringify(ruleTolerances),
-                  explanation: `Auto-proposed match (${evalSummary.totalCriteriaSatisfied} criteria satisfied, ${evalSummary.strongCriteriaSatisfied} strong): ${evalSummary.criteriaSatisfied.join(', ')}`,
+                  explanation: `Auto-reconciled match (${evalSummary.totalCriteriaSatisfied} criteria satisfied, ${evalSummary.strongCriteriaSatisfied} strong): ${evalSummary.criteriaSatisfied.join(', ')}`,
                   createdByType: 'SYSTEM',
                   isManualOverride: false,
                 },
@@ -1086,16 +1218,42 @@ export const proposeAutoMatchesHandler = async (req: any, res: any) => {
                 },
               });
 
-              const bTotal = bPrior.plus(bAlloc);
+              // Qualifying automatic matches are confirmed immediately.
+              // Recalculate transaction status from confirmed allocations so
+              // weak/nonqualifying transactions remain UNMATCHED/PARTIALLY_MATCHED.
+
+              const bankAllocated = await tx.bankTransactionMatch.aggregate({
+                where: { bankTransactionId: bTx.id, match: { matchStatus: 'CONFIRMED' } },
+                _sum: { allocatedAmount: true },
+              });
+              const bankAllocatedAmount = bankAllocated._sum.allocatedAmount || new Prisma.Decimal(0);
+              const bankAmount = bAbs;
               await tx.bankTransaction.update({
                 where: { id: bTx.id },
-                data: { status: bTotal.gte(bAbs) ? 'MATCHED' : 'PARTIALLY_MATCHED' },
+                data: {
+                  status: bankAllocatedAmount.isZero()
+                    ? 'UNMATCHED'
+                    : bankAllocatedAmount.lt(bankAmount)
+                      ? 'PARTIALLY_MATCHED'
+                      : 'MATCHED',
+                },
               });
 
-              const gTotal = gPrior.plus(gAlloc);
+              const glAllocated = await tx.glTransactionMatch.aggregate({
+                where: { glTransactionId: gTx.id, match: { matchStatus: 'CONFIRMED' } },
+                _sum: { allocatedAmount: true },
+              });
+              const glAllocatedAmount = glAllocated._sum.allocatedAmount || new Prisma.Decimal(0);
+              const glAmount = gAbs;
               await tx.glTransaction.update({
                 where: { id: gTx.id },
-                data: { status: gTotal.gte(gAbs) ? 'MATCHED' : 'PARTIALLY_MATCHED' },
+                data: {
+                  status: glAllocatedAmount.isZero()
+                    ? 'UNMATCHED'
+                    : glAllocatedAmount.lt(glAmount)
+                      ? 'PARTIALLY_MATCHED'
+                      : 'MATCHED',
+                },
               });
 
               return matchRecord;
@@ -1107,6 +1265,62 @@ export const proposeAutoMatchesHandler = async (req: any, res: any) => {
             break; // Proceed to next bank transaction
           }
         }
+      }
+    }
+
+    // Persist the strongest review candidate for each bank transaction so the
+    // reconciliation workspace can load the review queue after this request completes.
+    for (const candidate of reviewCandidates.values()) {
+      await prisma.reconciliationReviewCandidate.upsert({
+        where: {
+          reconciliationPeriodId_bankTransactionId_glTransactionId: {
+            reconciliationPeriodId: periodId,
+            bankTransactionId: candidate.bankTransactionId,
+            glTransactionId: candidate.glTransactionId,
+          },
+        },
+        create: {
+          reconciliationPeriodId: periodId,
+          organizationId: orgId,
+          bankTransactionId: candidate.bankTransactionId,
+          glTransactionId: candidate.glTransactionId,
+          matchingRuleId: candidate.matchingRuleId,
+          totalCriteriaSatisfied: candidate.totalCriteriaSatisfied,
+          strongCriteriaSatisfied: candidate.strongCriteriaSatisfied,
+          criteriaSatisfied: JSON.stringify(candidate.criteriaSatisfied),
+          criteriaFailed: JSON.stringify(candidate.criteriaFailed),
+          confidenceScore: new Prisma.Decimal(candidate.confidenceScore),
+          breakdown: JSON.stringify(candidate.breakdown),
+          status: 'OPEN',
+        },
+        update: {
+          matchingRuleId: candidate.matchingRuleId,
+          totalCriteriaSatisfied: candidate.totalCriteriaSatisfied,
+          strongCriteriaSatisfied: candidate.strongCriteriaSatisfied,
+          criteriaSatisfied: JSON.stringify(candidate.criteriaSatisfied),
+          criteriaFailed: JSON.stringify(candidate.criteriaFailed),
+          confidenceScore: new Prisma.Decimal(candidate.confidenceScore),
+          breakdown: JSON.stringify(candidate.breakdown),
+          status: 'OPEN',
+        },
+      });
+    }
+
+    // Automatically reconciled transactions are no longer review candidates.
+    if (proposedMatches.length > 0) {
+      const matchedBankIds = proposedMatches.flatMap((match: any) =>
+        (match.bankTransactions || []).map((link: any) => link.bankTransactionId)
+      );
+      if (matchedBankIds.length > 0) {
+        await prisma.reconciliationReviewCandidate.updateMany({
+          where: {
+            reconciliationPeriodId: periodId,
+            organizationId: orgId,
+            bankTransactionId: { in: matchedBankIds },
+            status: 'OPEN',
+          },
+          data: { status: 'ACCEPTED' },
+        });
       }
     }
 
@@ -1122,21 +1336,22 @@ export const proposeAutoMatchesHandler = async (req: any, res: any) => {
       actorId: req.user?.id,
       actorEmail: req.user?.email,
       actorRole: req.user?.roles[0],
-      action: 'AUTOMATIC_MATCHES_PROPOSED',
+      action: 'AUTOMATIC_MATCHES_RECONCILED',
       entityType: 'ReconciliationPeriod',
       entityId: periodId,
       newValue: {
         proposedCount: proposedMatches.length,
         matchIds: proposedMatches.map((m) => m.id),
       },
-      reason: `Automated matching engine evaluated and proposed ${proposedMatches.length} candidate match(es)`,
+      reason: `Automated matching engine evaluated and automatically reconciled ${proposedMatches.length} qualifying match(es); nonqualifying transactions remain available for manual review`,
     });
 
     res.json({
       success: true,
       count: proposedMatches.length,
       matches: proposedMatches,
-      message: `Successfully proposed ${proposedMatches.length} automatic match(es).`,
+      reviewCandidates: Array.from(reviewCandidates.values()),
+      message: `Successfully automatically reconciled ${proposedMatches.length} qualifying match(es). Nonqualifying transactions remain available for manual review.`,
     });
   } catch (error) {
     console.error('Error in proposeAutoMatchesHandler:', error);
@@ -1157,6 +1372,8 @@ export const confirmMatchHandler = async (req: any, res: any) => {
       where: { id: matchId },
       include: {
         reconciliationPeriod: true,
+        bankTransactions: true,
+        glTransactions: true,
       },
     });
 
@@ -1170,36 +1387,110 @@ export const confirmMatchHandler = async (req: any, res: any) => {
       });
     }
 
-    if (match.matchStatus === 'CONFIRMED') {
-      return res.json({ success: true, message: 'Match is already confirmed', match });
+    // Confirmation is a forward-only action: only proposed matches may be confirmed.
+    // Already-confirmed matches are treated as idempotent re-confirmations.
+    if (match.matchStatus !== 'PROPOSED' && match.matchStatus !== 'CONFIRMED') {
+      return res.status(400).json({
+        error: `Cannot confirm reconciliation match from status ${match.matchStatus}. Only PROPOSED matches can be confirmed.`,
+      });
     }
 
-    const updated = await prisma.reconciliationMatch.update({
-      where: { id: matchId },
-      data: {
-        matchStatus: 'CONFIRMED',
-        explanation: match.explanation
-          ? `${match.explanation} (Confirmed by ${req.user?.email || 'user'})`
-          : `Confirmed by ${req.user?.email || 'user'}`,
-      },
-      include: {
-        bankTransactions: { include: { bankTransaction: true } },
-        glTransactions: { include: { glTransaction: true } },
-      },
+    const wasAlreadyConfirmed = match.matchStatus === 'CONFIRMED';
+
+    const updated = await prisma.$transaction(async (tx) => {
+      if (!wasAlreadyConfirmed) {
+        await tx.reconciliationMatch.update({
+          where: { id: matchId },
+          data: {
+            matchStatus: 'CONFIRMED',
+            explanation: match.explanation
+              ? `${match.explanation} (Confirmed by ${req.user?.email || 'user'})`
+              : `Confirmed by ${req.user?.email || 'user'}`,
+          },
+        });
+      }
+
+      // Transaction statuses are authoritative consequences of confirmed allocations.
+      // Proposed matches must not change BankTransaction/GlTransaction status.
+      for (const link of match.bankTransactions) {
+        const allocations = await tx.bankTransactionMatch.aggregate({
+          where: {
+            bankTransactionId: link.bankTransactionId,
+            match: { matchStatus: 'CONFIRMED' },
+          },
+          _sum: { allocatedAmount: true },
+        });
+
+        const bankTx = await tx.bankTransaction.findUnique({
+          where: { id: link.bankTransactionId },
+        });
+        if (!bankTx) continue;
+
+        const allocated = allocations._sum.allocatedAmount || new Prisma.Decimal(0);
+        const amount = new Prisma.Decimal(bankTx.signedAmount).abs();
+        const status = allocated.isZero()
+          ? 'UNMATCHED'
+          : allocated.lt(amount)
+            ? 'PARTIALLY_MATCHED'
+            : 'MATCHED';
+
+        await tx.bankTransaction.update({
+          where: { id: link.bankTransactionId },
+          data: { status },
+        });
+      }
+
+      for (const link of match.glTransactions) {
+        const allocations = await tx.glTransactionMatch.aggregate({
+          where: {
+            glTransactionId: link.glTransactionId,
+            match: { matchStatus: 'CONFIRMED' },
+          },
+          _sum: { allocatedAmount: true },
+        });
+
+        const glTx = await tx.glTransaction.findUnique({
+          where: { id: link.glTransactionId },
+        });
+        if (!glTx) continue;
+
+        const allocated = allocations._sum.allocatedAmount || new Prisma.Decimal(0);
+        const amount = new Prisma.Decimal(glTx.amount).abs();
+        const status = allocated.isZero()
+          ? 'UNMATCHED'
+          : allocated.lt(amount)
+            ? 'PARTIALLY_MATCHED'
+            : 'MATCHED';
+
+        await tx.glTransaction.update({
+          where: { id: link.glTransactionId },
+          data: { status },
+        });
+      }
+
+      return tx.reconciliationMatch.findUnique({
+        where: { id: matchId },
+        include: {
+          bankTransactions: { include: { bankTransaction: true } },
+          glTransactions: { include: { glTransaction: true } },
+        },
+      });
     });
 
-    await recordAuditEvent({
-      organizationId: orgId,
-      actorId: req.user?.id,
-      actorEmail: req.user?.email,
-      actorRole: req.user?.roles[0],
-      action: 'MATCH_CONFIRMED',
-      entityType: 'ReconciliationMatch',
-      entityId: matchId,
-      previousValue: { matchStatus: match.matchStatus },
-      newValue: { matchStatus: 'CONFIRMED' },
-      reason: `User confirmed proposed match ${matchId}`,
-    });
+    if (!wasAlreadyConfirmed) {
+      await recordAuditEvent({
+        organizationId: orgId,
+        actorId: req.user?.id,
+        actorEmail: req.user?.email,
+        actorRole: req.user?.roles[0],
+        action: 'MATCH_CONFIRMED',
+        entityType: 'ReconciliationMatch',
+        entityId: matchId,
+        previousValue: { matchStatus: match.matchStatus },
+        newValue: { matchStatus: 'CONFIRMED' },
+        reason: `User confirmed proposed match ${matchId}`,
+      });
+    }
 
     res.json({ success: true, match: updated });
   } catch (error) {
@@ -1212,9 +1503,129 @@ reconciliationRouter.post('/:id/confirm', requirePermission('manually_match'), c
 reconciliationRouter.post('/matches/:id/confirm', requirePermission('manually_match'), confirmMatchHandler);
 reconciliationRouter.post('/periods/:periodId/matches/:id/confirm', requirePermission('manually_match'), confirmMatchHandler);
 
-reconciliationRouter.post('/:id/reject', requirePermission('manually_match'), unmatchHandler);
-reconciliationRouter.post('/matches/:id/reject', requirePermission('manually_match'), unmatchHandler);
-reconciliationRouter.post('/periods/:periodId/matches/:id/reject', requirePermission('manually_match'), unmatchHandler);
+// Reject a proposed match without conflating rejection with reversal of a confirmed match.
+export const rejectMatchHandler = async (req: any, res: any) => {
+  try {
+    const orgId = req.organization!.id;
+    const { id } = req.params;
+    const bodyMatchId = req.body?.matchId;
+    const matchId = bodyMatchId || id;
+
+    const initialMatch = await prisma.reconciliationMatch.findFirst({
+      where: { id: matchId },
+      include: { reconciliationPeriod: true },
+    });
+
+    if (!initialMatch || initialMatch.reconciliationPeriod.organizationId !== orgId) {
+      return res.status(404).json({ error: 'Reconciliation match not found' });
+    }
+
+    if (initialMatch.reconciliationPeriod.isLocked || initialMatch.reconciliationPeriod.status === 'CLOSED') {
+      return res.status(403).json({ error: 'Cannot reject a match on a locked or closed reconciliation period' });
+    }
+
+    if (initialMatch.matchStatus !== 'PROPOSED') {
+      return res.status(400).json({
+        error: `Cannot reject reconciliation match from status ${initialMatch.matchStatus}. Only PROPOSED matches can be rejected.`,
+      });
+    }
+
+    const match = await prisma.reconciliationMatch.findFirst({
+      where: {
+        id: matchId,
+        reconciliationPeriodId: initialMatch.reconciliationPeriodId,
+      },
+      include: {
+        bankTransactions: true,
+        glTransactions: true,
+      },
+    });
+
+    if (!match) {
+      return res.status(404).json({ error: 'Match record not found in period' });
+    }
+
+    await prisma.$transaction(async (tx) => {
+      // A rejected proposal must no longer reserve transaction allocations.
+      await tx.bankTransactionMatch.deleteMany({ where: { matchId } });
+      await tx.glTransactionMatch.deleteMany({ where: { matchId } });
+
+      // Recalculate affected Bank transaction statuses from remaining allocations.
+      const affectedBankTxIds = Array.from(new Set(match.bankTransactions.map((b) => b.bankTransactionId)));
+      for (const bId of affectedBankTxIds) {
+        const bTx = await tx.bankTransaction.findUnique({ where: { id: bId } });
+        if (!bTx) continue;
+
+        const remaining = await tx.bankTransactionMatch.aggregate({
+          where: { bankTransactionId: bId, match: { matchStatus: 'CONFIRMED' } },
+          _sum: { allocatedAmount: true },
+        });
+        const allocated = remaining._sum.allocatedAmount || new Prisma.Decimal(0);
+        const amount = new Prisma.Decimal(bTx.signedAmount).abs();
+        const status = allocated.isZero()
+          ? 'UNMATCHED'
+          : allocated.lt(amount)
+            ? 'PARTIALLY_MATCHED'
+            : 'MATCHED';
+
+        await tx.bankTransaction.update({ where: { id: bId }, data: { status } });
+      }
+
+      // Recalculate affected GL transaction statuses from remaining allocations.
+      const affectedGlTxIds = Array.from(new Set(match.glTransactions.map((g) => g.glTransactionId)));
+      for (const gId of affectedGlTxIds) {
+        const gTx = await tx.glTransaction.findUnique({ where: { id: gId } });
+        if (!gTx) continue;
+
+        const remaining = await tx.glTransactionMatch.aggregate({
+          where: { glTransactionId: gId, match: { matchStatus: 'CONFIRMED' } },
+          _sum: { allocatedAmount: true },
+        });
+        const allocated = remaining._sum.allocatedAmount || new Prisma.Decimal(0);
+        const amount = new Prisma.Decimal(gTx.amount).abs();
+        const status = allocated.isZero()
+          ? 'UNMATCHED'
+          : allocated.lt(amount)
+            ? 'PARTIALLY_MATCHED'
+            : 'MATCHED';
+
+        await tx.glTransaction.update({ where: { id: gId }, data: { status } });
+      }
+
+      await tx.reconciliationMatch.update({
+        where: { id: matchId },
+        data: {
+          matchStatus: 'REJECTED',
+          explanation: match.explanation
+            ? `${match.explanation} (Rejected by ${req.user?.email || 'user'})`
+            : `Rejected by ${req.user?.email || 'user'}`,
+        },
+      });
+    });
+
+    await recordAuditEvent({
+      organizationId: orgId,
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      actorRole: req.user?.roles[0],
+      action: 'MATCH_REJECTED',
+      entityType: 'ReconciliationMatch',
+      entityId: matchId,
+      previousValue: { matchId, status: 'PROPOSED' },
+      newValue: { matchId, status: 'REJECTED' },
+      reason: 'User rejected proposed reconciliation match',
+    });
+
+    res.json({ success: true, message: 'Match proposal rejected' });
+  } catch (error) {
+    console.error('Error rejecting match:', error);
+    res.status(500).json({ error: 'Failed to reject reconciliation match' });
+  }
+};
+
+reconciliationRouter.post('/:id/reject', requirePermission('manually_match'), rejectMatchHandler);
+reconciliationRouter.post('/matches/:id/reject', requirePermission('manually_match'), rejectMatchHandler);
+reconciliationRouter.post('/periods/:periodId/matches/:id/reject', requirePermission('manually_match'), rejectMatchHandler);
 
 // Submit Stage Approval Workflow (PREPARED -> REVIEWED -> APPROVED -> CLOSED)
 export const submitApprovalHandler = async (req: any, res: any) => {
@@ -1253,6 +1664,60 @@ export const submitApprovalHandler = async (req: any, res: any) => {
           error: `Invalid state transition: Cannot prepare period from status ${period.status}. Expected one of: ${allowedPrior.join(', ')}`,
         });
       }
+
+      // A period may only be prepared when every relevant bank/GL transaction
+      // is fully reconciled. PARTIALLY_MATCHED and UNMATCHED transactions are
+      // incomplete and must block preparation. EXCLUDED transactions are
+      // intentionally outside the reconciliation population.
+      const incompleteBankTransactions = await prisma.bankTransaction.count({
+        where: {
+          organizationId: orgId,
+          bankAccountId: period.bankAccountId,
+          transactionDate: {
+            gte: period.periodStart,
+            lte: period.periodEnd,
+          },
+          status: {
+            in: ['UNMATCHED', 'PARTIALLY_MATCHED'],
+          },
+        },
+      });
+
+      const incompleteGlTransactions = await prisma.glTransaction.count({
+        where: {
+          organizationId: orgId,
+          bankAccountId: period.bankAccountId,
+          transactionDate: {
+            gte: period.periodStart,
+            lte: period.periodEnd,
+          },
+          status: {
+            in: ['UNMATCHED', 'PARTIALLY_MATCHED'],
+          },
+        },
+      });
+
+      const unresolvedExceptions = await prisma.exceptionRecord.count({
+        where: {
+          organizationId: orgId,
+          reconciliationPeriodId: periodId,
+          status: {
+            in: ['OPEN', 'IN_REVIEW', 'ESCALATED'],
+          },
+        },
+      });
+
+      if (incompleteBankTransactions > 0 || incompleteGlTransactions > 0 || unresolvedExceptions > 0) {
+        return res.status(400).json({
+          error: 'Cannot prepare reconciliation period: all relevant transactions must be fully matched and all exceptions must be resolved or waived.',
+          details: {
+            incompleteBankTransactions,
+            incompleteGlTransactions,
+            unresolvedExceptions,
+          },
+        });
+      }
+
       nextStatus = 'PREPARED';
       updateData.preparedById = req.user?.id;
       updateData.preparedAt = new Date();

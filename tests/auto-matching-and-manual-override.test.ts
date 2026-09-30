@@ -48,11 +48,13 @@ describe('Auto-Matching Engine & Manual Override Hardening', () => {
     testBankAccountId = org!.bankAccounts[0].id;
     testUserId = org!.users[0].id;
 
-    // Locate or create a dedicated reconciliation period for this test suite
+    // Locate or create the dedicated November 2026 reconciliation period for this test suite
     let period = await prisma.reconciliationPeriod.findFirst({
       where: {
         organizationId: testOrgId,
         bankAccountId: testBankAccountId,
+        periodStart: new Date('2026-11-01'),
+        periodEnd: new Date('2026-11-30'),
         status: { in: ['NOT_STARTED', 'PROCESSING'] },
         isLocked: false,
       },
@@ -71,6 +73,7 @@ describe('Auto-Matching Engine & Manual Override Hardening', () => {
         },
       });
     }
+
     testPeriodId = period.id;
   });
 
@@ -286,7 +289,7 @@ describe('Auto-Matching Engine & Manual Override Hardening', () => {
       data: {
         organizationId: testOrgId,
         bankAccountId: testBankAccountId,
-        transactionDate: new Date('2026-09-12'),
+        transactionDate: new Date('2026-11-12'),
         description: `Automated Payroll ${nonce}`,
         referenceNumber: `PAY-BATCH-${nonce}`,
         accountNumber: '1111-OP',
@@ -305,7 +308,7 @@ describe('Auto-Matching Engine & Manual Override Hardening', () => {
       data: {
         organizationId: testOrgId,
         bankAccountId: testBankAccountId,
-        transactionDate: new Date('2026-09-12'),
+        transactionDate: new Date('2026-11-12'),
         narration: `Automated Payroll ${nonce}`,
         referenceNumber: `PAY-BATCH-${nonce}`,
         accountNumber: '1111-OP',
@@ -341,43 +344,37 @@ describe('Auto-Matching Engine & Manual Override Hardening', () => {
     );
     expect(proposedMatch).toBeDefined();
 
-    // Verify transaction statuses updated
+    // Qualifying automatic matches are reconciled immediately.
     const updatedBtx = await prisma.bankTransaction.findUnique({ where: { id: bTx1.id } });
     const updatedGtx = await prisma.glTransaction.findUnique({ where: { id: gTx1.id } });
     expect(updatedBtx?.status).toBe('MATCHED');
     expect(updatedGtx?.status).toBe('MATCHED');
+
+    const confirmedMatch = await prisma.reconciliationMatch.findFirst({
+      where: {
+        reconciliationPeriodId: testPeriodId,
+        matchStatus: 'CONFIRMED',
+      },
+    });
+    expect(confirmedMatch).not.toBeNull();
 
     // Verify period status updated to PROCESSING
     const period = await prisma.reconciliationPeriod.findUnique({ where: { id: testPeriodId } });
     expect(period?.status).toBe('PROCESSING');
   });
 
-  it('5. Confirm proposed match transitions match status to CONFIRMED', async () => {
-    // Locate proposed match created in test 4
-    const proposed = await prisma.reconciliationMatch.findFirst({
+  it('5. Qualifying automatic matches are already confirmed and do not require manual confirmation', async () => {
+    const confirmed = await prisma.reconciliationMatch.findFirst({
       where: {
         reconciliationPeriodId: testPeriodId,
-        matchStatus: 'PROPOSED',
+        matchStatus: 'CONFIRMED',
+        createdByType: 'SYSTEM',
       },
     });
-    expect(proposed).not.toBeNull();
 
-    const req = {
-      organization: { id: testOrgId },
-      params: { id: proposed!.id },
-      user: { id: testUserId, email: 'accountant@acme.com', roles: ['ACCOUNTANT'], permissions: ['manually_match'] },
-    };
-    const res = createMockRes();
-
-    await confirmMatchHandler(req as any, res as any);
-
-    expect(res.statusCode).toBe(200);
-    expect(res.jsonData.success).toBe(true);
-    expect(res.jsonData.match.matchStatus).toBe('CONFIRMED');
-
-    // Check database
-    const confirmed = await prisma.reconciliationMatch.findUnique({ where: { id: proposed!.id } });
-    expect(confirmed?.matchStatus).toBe('CONFIRMED');
+    expect(confirmed).not.toBeNull();
+    expect(confirmed?.createdByType).toBe('SYSTEM');
+    expect(confirmed?.isManualOverride).toBe(false);
   });
 
   it('6. Propose auto matches rejects closed or locked periods', async () => {

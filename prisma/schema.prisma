@@ -288,6 +288,7 @@ model BankTransaction {
   statement              BankStatement?         @relation(fields: [statementId], references: [id], onDelete: SetNull)
   statementPage          StatementPage?         @relation(fields: [statementPageId], references: [id], onDelete: SetNull)
   matchItems             BankTransactionMatch[]
+  reviewCandidates       ReconciliationReviewCandidate[]
   exceptions             ExceptionRecord[]
 
   @@index([organizationId])
@@ -331,6 +332,7 @@ model GlTransaction {
   bankAccount            BankAccount?         @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
   glImport               GlImport?            @relation(fields: [glImportId], references: [id], onDelete: SetNull)
   matchItems             GlTransactionMatch[]
+  reviewCandidates       ReconciliationReviewCandidate[]
   exceptions             ExceptionRecord[]
 
   @@index([organizationId])
@@ -432,12 +434,43 @@ model ReconciliationPeriod {
   approvedBy     User?                  @relation("PeriodApprover", fields: [approvedById], references: [id], onDelete: SetNull)
 
   matches        ReconciliationMatch[]
+  reviewCandidates ReconciliationReviewCandidate[]
   approvals      ApprovalWorkflow[]
   exceptions     ExceptionRecord[]
 
   @@unique([organizationId, bankAccountId, periodStart, periodEnd])
   @@index([organizationId])
   @@index([bankAccountId])
+  @@index([status])
+}
+
+model ReconciliationReviewCandidate {
+  id                     String               @id @default(uuid())
+  reconciliationPeriodId String
+  organizationId         String
+  bankTransactionId      String
+  glTransactionId        String
+  matchingRuleId         String?
+  totalCriteriaSatisfied Int
+  strongCriteriaSatisfied Int
+  criteriaSatisfied      String
+  criteriaFailed         String
+  confidenceScore        Decimal
+  breakdown              String
+  status                 String               @default("OPEN") // OPEN, ACCEPTED, REJECTED, DISMISSED
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
+
+  reconciliationPeriod   ReconciliationPeriod @relation(fields: [reconciliationPeriodId], references: [id], onDelete: Cascade)
+  bankTransaction        BankTransaction      @relation(fields: [bankTransactionId], references: [id], onDelete: Restrict)
+  glTransaction           GlTransaction        @relation(fields: [glTransactionId], references: [id], onDelete: Restrict)
+  matchingRule            MatchingRule?       @relation(fields: [matchingRuleId], references: [id], onDelete: SetNull)
+
+  @@unique([reconciliationPeriodId, bankTransactionId, glTransactionId])
+  @@index([organizationId])
+  @@index([reconciliationPeriodId])
+  @@index([bankTransactionId])
+  @@index([glTransactionId])
   @@index([status])
 }
 
@@ -552,6 +585,7 @@ model MatchingRule {
   organization       Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   bankAccount        BankAccount?          @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
   matches            ReconciliationMatch[]
+  reviewCandidates   ReconciliationReviewCandidate[]
   tolerances         ToleranceConfig[]
 
   @@unique([organizationId, name])

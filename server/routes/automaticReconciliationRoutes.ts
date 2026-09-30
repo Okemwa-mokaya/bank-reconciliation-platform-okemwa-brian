@@ -389,36 +389,6 @@ automaticReconciliationRouter.post('/matches/:id/approve', requirePermission('ma
   res.json({ success: true, match: updated });
 });
 
-automaticReconciliationRouter.post('/matches/:id/confirm', requirePermission('manually_match'), async (req: any, res) => {
-  const orgId = req.organization!.id;
-  const match = await getMatchForOrg(req.params.id, orgId);
-  if (!match) return res.status(404).json({ error: 'Reconciliation match not found' });
-  if (match.reconciliationPeriod.isLocked || match.reconciliationPeriod.status === 'CLOSED') return res.status(403).json({ error: 'Reconciliation period is locked or closed' });
-  if (match.matchStatus !== 'APPROVED' && match.matchStatus !== 'CONFIRMED') return res.status(409).json({ error: `Cannot confirm match from status ${match.matchStatus}` });
-  if (match.matchStatus === 'CONFIRMED') return res.json({ success: true, match });
-
-  const updated = await prisma.$transaction(async (tx) => {
-    const current = await tx.reconciliationMatch.findFirst({ where: { id: match.id, reconciliationPeriod: { organizationId: orgId } }, include: { bankTransactions: true, glTransactions: true } });
-    if (!current || current.matchStatus !== 'APPROVED') throw new Error('MATCH_NOT_APPROVED');
-
-    for (const item of current.bankTransactions) {
-      const row = await tx.bankTransaction.findUnique({ where: { id: item.bankTransactionId } });
-      if (!row || (row.status !== 'UNMATCHED' && row.status !== 'PARTIALLY_MATCHED')) throw new Error(`BANK_TRANSACTION_UNAVAILABLE:${item.bankTransactionId}`);
-    }
-    for (const item of current.glTransactions) {
-      const row = await tx.glTransaction.findUnique({ where: { id: item.glTransactionId } });
-      if (!row || (row.status !== 'UNMATCHED' && row.status !== 'PARTIALLY_MATCHED')) throw new Error(`GL_TRANSACTION_UNAVAILABLE:${item.glTransactionId}`);
-    }
-
-    for (const item of current.bankTransactions) await tx.bankTransaction.update({ where: { id: item.bankTransactionId }, data: { status: 'MATCHED' } });
-    for (const item of current.glTransactions) await tx.glTransaction.update({ where: { id: item.glTransactionId }, data: { status: 'MATCHED' } });
-
-    return tx.reconciliationMatch.update({ where: { id: current.id }, data: { matchStatus: 'CONFIRMED' }, include: { bankTransactions: { include: { bankTransaction: true } }, glTransactions: { include: { glTransaction: true } } } });
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, maxWait: 5000, timeout: 10000 });
-
-  await audit(req, orgId, 'MATCH_CONFIRMED', match.id, { matchStatus: 'APPROVED' }, { matchStatus: 'CONFIRMED' }, 'Approved reconciliation match confirmed and transactions committed as matched');
-  res.json({ success: true, match: updated });
-});
 
 automaticReconciliationRouter.post('/matches/:id/reject', requirePermission('manually_match'), async (req: any, res) => {
   const orgId = req.organization!.id;
@@ -443,13 +413,77 @@ automaticReconciliationRouter.post('/matches/:id/reverse', requirePermission('ma
   if (match.matchStatus !== 'CONFIRMED') return res.status(409).json({ error: `Only CONFIRMED matches can be reversed; current status is ${match.matchStatus}` });
 
   await prisma.$transaction(async (tx) => {
+    // Recalculate transaction status from the remaining CONFIRMED allocations.
+    // Reversing one match must not erase other confirmed allocations.
     for (const item of match.bankTransactions) {
-      await tx.bankTransaction.update({ where: { id: item.bankTransactionId }, data: { status: 'UNMATCHED' } });
+      const bankTx = await tx.bankTransaction.findUnique({
+        where: { id: item.bankTransactionId },
+      });
+      if (!bankTx) continue;
+
+      const allocations = await tx.bankTransactionMatch.aggregate({
+        where: {
+          bankTransactionId: item.bankTransactionId,
+          match: {
+            matchStatus: 'CONFIRMED',
+            id: { not: match.id },
+          },
+        },
+        _sum: { allocatedAmount: true },
+      });
+
+      const allocated = allocations._sum.allocatedAmount || new Prisma.Decimal(0);
+      const amount = new Prisma.Decimal(bankTx.signedAmount).abs();
+      const status = allocated.isZero()
+        ? 'UNMATCHED'
+        : allocated.lt(amount)
+          ? 'PARTIALLY_MATCHED'
+          : 'MATCHED';
+
+      await tx.bankTransaction.update({
+        where: { id: item.bankTransactionId },
+        data: { status },
+      });
     }
+
     for (const item of match.glTransactions) {
-      await tx.glTransaction.update({ where: { id: item.glTransactionId }, data: { status: 'UNMATCHED' } });
+      const glTx = await tx.glTransaction.findUnique({
+        where: { id: item.glTransactionId },
+      });
+      if (!glTx) continue;
+
+      const allocations = await tx.glTransactionMatch.aggregate({
+        where: {
+          glTransactionId: item.glTransactionId,
+          match: {
+            matchStatus: 'CONFIRMED',
+            id: { not: match.id },
+          },
+        },
+        _sum: { allocatedAmount: true },
+      });
+
+      const allocated = allocations._sum.allocatedAmount || new Prisma.Decimal(0);
+      const amount = new Prisma.Decimal(glTx.amount).abs();
+      const status = allocated.isZero()
+        ? 'UNMATCHED'
+        : allocated.lt(amount)
+          ? 'PARTIALLY_MATCHED'
+          : 'MATCHED';
+
+      await tx.glTransaction.update({
+        where: { id: item.glTransactionId },
+        data: { status },
+      });
     }
-    await tx.reconciliationMatch.update({ where: { id: match.id }, data: { matchStatus: 'REVERSED', explanation: `${match.explanation || ''} [REVERSED: ${reason}]` } });
+
+    await tx.reconciliationMatch.update({
+      where: { id: match.id },
+      data: {
+        matchStatus: 'REVERSED',
+        explanation: `${match.explanation || ''} [REVERSED: ${reason}]`,
+      },
+    });
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, maxWait: 5000, timeout: 10000 });
 
   await audit(req, orgId, 'MATCH_REVERSED', match.id, { matchStatus: 'CONFIRMED' }, { matchStatus: 'REVERSED', reason }, reason);

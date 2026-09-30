@@ -1351,8 +1351,6 @@ describe('Production Unmatch Status Recalculation Tests', () => {
     const glTxUpdateSpy = vi.fn().mockResolvedValue({});
     const btxmDeleteManySpy = vi.fn().mockResolvedValue({ count: 1 });
     const gtxmDeleteManySpy = vi.fn().mockResolvedValue({ count: 1 });
-    const matchDeleteSpy = vi.fn().mockResolvedValue({});
-
     vi.spyOn(prisma, '$transaction').mockImplementation(async (cb: any) => {
       return cb({
         bankTransactionMatch: {
@@ -1370,7 +1368,7 @@ describe('Production Unmatch Status Recalculation Tests', () => {
           }),
         },
         reconciliationMatch: {
-          delete: matchDeleteSpy,
+          update: vi.fn().mockResolvedValue({}),
         },
         bankTransaction: {
           findUnique: vi.fn().mockResolvedValue({
@@ -1442,7 +1440,7 @@ describe('Production Unmatch Status Recalculation Tests', () => {
           }),
         },
         reconciliationMatch: {
-          delete: vi.fn().mockResolvedValue({}),
+          update: vi.fn().mockResolvedValue({}),
         },
         bankTransaction: {
           findUnique: vi.fn().mockResolvedValue({
@@ -1513,7 +1511,7 @@ describe('Production Unmatch Status Recalculation Tests', () => {
           }),
         },
         reconciliationMatch: {
-          delete: vi.fn().mockResolvedValue({}),
+          update: vi.fn().mockResolvedValue({}),
         },
         bankTransaction: {
           findUnique: vi.fn().mockResolvedValue({

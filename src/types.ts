@@ -38,7 +38,7 @@ export interface BankAccount {
   openingBalance: number;
   currentBalance?: number | null;
   glAccountCode?: string | null;
-  isActive: boolean;
+  status: string;
   bank: Bank;
   _count?: {
     statements: number;
@@ -367,3 +367,4 @@ export interface DashboardSummaryResponse {
   recentAuditEvents: AuditEvent[];
   recentReconciliationPeriods: ReconciliationPeriod[];
 }
+
