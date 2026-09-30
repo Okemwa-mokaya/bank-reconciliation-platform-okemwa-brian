@@ -1082,12 +1082,12 @@ export const proposeAutoMatchesHandler = async (req: any, res: any) => {
                 data: {
                   reconciliationPeriodId: periodId,
                   matchType: 'ONE_TO_ONE',
-                  matchStatus: 'PROPOSED',
+                  matchStatus: 'CONFIRMED',
                   matchingRuleId: rule?.id || null,
                   confidenceScore: new Prisma.Decimal(evalSummary.confidenceScore),
                   criteriaMatched: JSON.stringify(evalSummary.criteriaSatisfied),
                   tolerancesApplied: JSON.stringify(ruleTolerances),
-                  explanation: `Auto-proposed match (${evalSummary.totalCriteriaSatisfied} criteria satisfied, ${evalSummary.strongCriteriaSatisfied} strong): ${evalSummary.criteriaSatisfied.join(', ')}`,
+                  explanation: `Auto-reconciled match (${evalSummary.totalCriteriaSatisfied} criteria satisfied, ${evalSummary.strongCriteriaSatisfied} strong): ${evalSummary.criteriaSatisfied.join(', ')}`,
                   createdByType: 'SYSTEM',
                   isManualOverride: false,
                 },
@@ -1109,8 +1109,43 @@ export const proposeAutoMatchesHandler = async (req: any, res: any) => {
                 },
               });
 
-              // Proposal creation must not change transaction status.
-              // Bank/GL transactions become MATCHED or PARTIALLY_MATCHED only when a proposal is confirmed.
+              // Qualifying automatic matches are confirmed immediately.
+              // Recalculate transaction status from confirmed allocations so
+              // weak/nonqualifying transactions remain UNMATCHED/PARTIALLY_MATCHED.
+
+              const bankAllocated = await tx.bankTransactionMatch.aggregate({
+                where: { bankTransactionId: bTx.id, match: { matchStatus: 'CONFIRMED' } },
+                _sum: { allocatedAmount: true },
+              });
+              const bankAllocatedAmount = bankAllocated._sum.allocatedAmount || new Prisma.Decimal(0);
+              const bankAmount = bAbs;
+              await tx.bankTransaction.update({
+                where: { id: bTx.id },
+                data: {
+                  status: bankAllocatedAmount.isZero()
+                    ? 'UNMATCHED'
+                    : bankAllocatedAmount.lt(bankAmount)
+                      ? 'PARTIALLY_MATCHED'
+                      : 'MATCHED',
+                },
+              });
+
+              const glAllocated = await tx.glTransactionMatch.aggregate({
+                where: { glTransactionId: gTx.id, match: { matchStatus: 'CONFIRMED' } },
+                _sum: { allocatedAmount: true },
+              });
+              const glAllocatedAmount = glAllocated._sum.allocatedAmount || new Prisma.Decimal(0);
+              const glAmount = gAbs;
+              await tx.glTransaction.update({
+                where: { id: gTx.id },
+                data: {
+                  status: glAllocatedAmount.isZero()
+                    ? 'UNMATCHED'
+                    : glAllocatedAmount.lt(glAmount)
+                      ? 'PARTIALLY_MATCHED'
+                      : 'MATCHED',
+                },
+              });
 
               return matchRecord;
             });
@@ -1136,21 +1171,21 @@ export const proposeAutoMatchesHandler = async (req: any, res: any) => {
       actorId: req.user?.id,
       actorEmail: req.user?.email,
       actorRole: req.user?.roles[0],
-      action: 'AUTOMATIC_MATCHES_PROPOSED',
+      action: 'AUTOMATIC_MATCHES_RECONCILED',
       entityType: 'ReconciliationPeriod',
       entityId: periodId,
       newValue: {
         proposedCount: proposedMatches.length,
         matchIds: proposedMatches.map((m) => m.id),
       },
-      reason: `Automated matching engine evaluated and proposed ${proposedMatches.length} candidate match(es)`,
+      reason: `Automated matching engine evaluated and automatically reconciled ${proposedMatches.length} qualifying match(es); nonqualifying transactions remain available for manual review`,
     });
 
     res.json({
       success: true,
       count: proposedMatches.length,
       matches: proposedMatches,
-      message: `Successfully proposed ${proposedMatches.length} automatic match(es).`,
+      message: `Successfully automatically reconciled ${proposedMatches.length} qualifying match(es). Nonqualifying transactions remain available for manual review.`,
     });
   } catch (error) {
     console.error('Error in proposeAutoMatchesHandler:', error);
