@@ -365,7 +365,7 @@ describe('Auto-Matching Engine & Manual Override Hardening', () => {
       where: {
         reconciliationPeriodId: testPeriodId,
         matchStatus: 'CONFIRMED',
-        bankTransactions: { some: {} },
+        createdByType: 'SYSTEM',
       },
     });
 
