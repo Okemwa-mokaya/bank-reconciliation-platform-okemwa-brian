@@ -1001,6 +1001,10 @@ export const proposeAutoMatchesHandler = async (req: any, res: any) => {
       where: {
         organizationId: orgId,
         bankAccountId: period.bankAccountId,
+        transactionDate: {
+          gte: period.periodStart,
+          lte: period.periodEnd,
+        },
         status: { in: ['UNMATCHED', 'PARTIALLY_MATCHED'] },
       },
       orderBy: { transactionDate: 'asc' },
@@ -1010,6 +1014,10 @@ export const proposeAutoMatchesHandler = async (req: any, res: any) => {
       where: {
         organizationId: orgId,
         bankAccountId: period.bankAccountId,
+        transactionDate: {
+          gte: period.periodStart,
+          lte: period.periodEnd,
+        },
         status: { in: ['UNMATCHED', 'PARTIALLY_MATCHED'] },
       },
       orderBy: { transactionDate: 'asc' },
@@ -1073,18 +1081,35 @@ export const proposeAutoMatchesHandler = async (req: any, res: any) => {
             minStrongCriteria: minStrong,
           });
 
-          // Retain the strongest nonqualifying candidate for manual review without creating a match.
-          if (!evalSummary.eligible && evalSummary.organizationIsolated) {
+          // Check whether the candidate satisfies all required criteria of the rule.
+          let passesRequired = true;
+          for (const reqCrit of requiredCriteriaCodes) {
+            if (!evalSummary.criteriaSatisfied.includes(reqCrit as any)) {
+              passesRequired = false;
+              break;
+            }
+          }
+
+          // Retain the strongest meaningful nonqualifying candidate for manual review.
+          // Candidates are persisted below so the review queue survives the request.
+          if ((!evalSummary.eligible || !passesRequired) &&
+              evalSummary.organizationIsolated &&
+              evalSummary.totalCriteriaSatisfied > 0) {
             const existing = reviewCandidates.get(bTx.id);
-            const candidateScore = evalSummary.strongCriteriaSatisfied * 100 + evalSummary.totalCriteriaSatisfied * 10 + evalSummary.confidenceScore;
+            const candidateScore =
+              evalSummary.strongCriteriaSatisfied * 100 +
+              evalSummary.totalCriteriaSatisfied * 10 +
+              evalSummary.confidenceScore;
             const existingScore = existing
-              ? existing.strongCriteriaSatisfied * 100 + existing.totalCriteriaSatisfied * 10 + existing.confidenceScore
+              ? existing.strongCriteriaSatisfied * 100 +
+                existing.totalCriteriaSatisfied * 10 +
+                existing.confidenceScore
               : -1;
             if (candidateScore > existingScore) {
               reviewCandidates.set(bTx.id, {
                 bankTransactionId: bTx.id,
                 glTransactionId: gTx.id,
-                eligible: false,
+                eligible: evalSummary.eligible,
                 totalCriteriaSatisfied: evalSummary.totalCriteriaSatisfied,
                 strongCriteriaSatisfied: evalSummary.strongCriteriaSatisfied,
                 criteriaSatisfied: evalSummary.criteriaSatisfied,
@@ -1097,16 +1122,8 @@ export const proposeAutoMatchesHandler = async (req: any, res: any) => {
             }
           }
 
-          // Check if eligible and meets all required criteria of the rule
+          // Only qualifying candidates may be automatically reconciled.
           if (evalSummary.eligible) {
-            let passesRequired = true;
-            for (const reqCrit of requiredCriteriaCodes) {
-              if (!evalSummary.criteriaSatisfied.includes(reqCrit as any)) {
-                passesRequired = false;
-                break;
-              }
-            }
-
             if (!passesRequired) continue;
 
             // Calculate allocations
@@ -1215,6 +1232,62 @@ export const proposeAutoMatchesHandler = async (req: any, res: any) => {
             break; // Proceed to next bank transaction
           }
         }
+      }
+    }
+
+    // Persist the strongest review candidate for each bank transaction so the
+    // reconciliation workspace can load the review queue after this request completes.
+    for (const candidate of reviewCandidates.values()) {
+      await prisma.reconciliationReviewCandidate.upsert({
+        where: {
+          reconciliationPeriodId_bankTransactionId_glTransactionId: {
+            reconciliationPeriodId: periodId,
+            bankTransactionId: candidate.bankTransactionId,
+            glTransactionId: candidate.glTransactionId,
+          },
+        },
+        create: {
+          reconciliationPeriodId: periodId,
+          organizationId: orgId,
+          bankTransactionId: candidate.bankTransactionId,
+          glTransactionId: candidate.glTransactionId,
+          matchingRuleId: candidate.matchingRuleId,
+          totalCriteriaSatisfied: candidate.totalCriteriaSatisfied,
+          strongCriteriaSatisfied: candidate.strongCriteriaSatisfied,
+          criteriaSatisfied: JSON.stringify(candidate.criteriaSatisfied),
+          criteriaFailed: JSON.stringify(candidate.criteriaFailed),
+          confidenceScore: new Prisma.Decimal(candidate.confidenceScore),
+          breakdown: JSON.stringify(candidate.breakdown),
+          status: 'OPEN',
+        },
+        update: {
+          matchingRuleId: candidate.matchingRuleId,
+          totalCriteriaSatisfied: candidate.totalCriteriaSatisfied,
+          strongCriteriaSatisfied: candidate.strongCriteriaSatisfied,
+          criteriaSatisfied: JSON.stringify(candidate.criteriaSatisfied),
+          criteriaFailed: JSON.stringify(candidate.criteriaFailed),
+          confidenceScore: new Prisma.Decimal(candidate.confidenceScore),
+          breakdown: JSON.stringify(candidate.breakdown),
+          status: 'OPEN',
+        },
+      });
+    }
+
+    // Automatically reconciled transactions are no longer review candidates.
+    if (proposedMatches.length > 0) {
+      const matchedBankIds = proposedMatches.flatMap((match: any) =>
+        (match.bankTransactions || []).map((link: any) => link.bankTransactionId)
+      );
+      if (matchedBankIds.length > 0) {
+        await prisma.reconciliationReviewCandidate.updateMany({
+          where: {
+            reconciliationPeriodId: periodId,
+            organizationId: orgId,
+            bankTransactionId: { in: matchedBankIds },
+            status: 'OPEN',
+          },
+          data: { status: 'ACCEPTED' },
+        });
       }
     }
 
