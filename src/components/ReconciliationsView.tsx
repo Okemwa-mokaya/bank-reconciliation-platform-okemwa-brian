@@ -409,14 +409,21 @@ export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ period
           )}
 
           {isLoadingMatches ? (
-            <div className="py-8 text-center text-xs text-stone-500">Loading period matches...</div>
-          ) : matches.length === 0 ? (
-            <div className="py-8 text-center text-xs text-stone-500 italic bg-white rounded-lg border border-stone-200">
-              No matches recorded for this period yet.
-            </div>
+            <div className="py-8 text-center text-xs text-stone-500">Loading period transactions and matches...</div>
           ) : (
-            <div className="space-y-3">
-              {matches.map((match) => {
+            <div className="space-y-5">
+              <section>
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="text-xs font-bold text-stone-900 uppercase tracking-wide">Automatically Reconciled</h4>
+                  <span className="text-[10px] font-semibold text-emerald-700">{matches.filter((match) => match.matchStatus === 'CONFIRMED').length} confirmed match(es)</span>
+                </div>
+                {matches.length === 0 ? (
+                  <div className="py-5 text-center text-xs text-stone-500 italic bg-white rounded-lg border border-stone-200">
+                    No matches recorded for this period yet.
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {matches.map((match) => {
                 const isOverride = match.isManualOverride || match.explanation?.includes('[MANUAL_OVERRIDE]');
 
                 return (
@@ -549,6 +556,56 @@ export const ReconciliationsView: React.FC<ReconciliationsViewProps> = ({ period
                   </div>
                 );
               })}
+                  </div>
+                )}
+              </section>
+
+              {[
+                { title: 'Unmatched Bank Transactions', items: bankTransactions.filter((tx) => tx.status === 'UNMATCHED'), type: 'BANK' },
+                { title: 'Unmatched GL Transactions', items: glTransactions.filter((tx) => tx.status === 'UNMATCHED'), type: 'GL' },
+                { title: 'Partially Matched Bank Transactions', items: bankTransactions.filter((tx) => tx.status === 'PARTIALLY_MATCHED'), type: 'BANK' },
+                { title: 'Partially Matched GL Transactions', items: glTransactions.filter((tx) => tx.status === 'PARTIALLY_MATCHED'), type: 'GL' },
+              ].map((section) => (
+                <section key={section.title}>
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-xs font-bold text-stone-900 uppercase tracking-wide">{section.title}</h4>
+                    <span className="text-[10px] font-semibold text-stone-500">{section.items.length}</span>
+                  </div>
+                  {section.items.length === 0 ? (
+                    <div className="py-4 text-center text-xs text-stone-400 bg-white rounded-lg border border-stone-200">
+                      None
+                    </div>
+                  ) : (
+                    <div className="bg-white border border-stone-200 rounded-lg divide-y divide-stone-100">
+                      {section.items.map((tx) => (
+                        <div key={tx.id} className="px-4 py-3 text-xs">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="font-medium text-stone-900">
+                              {section.type === 'BANK'
+                                ? (tx as BankTransaction).description
+                                : (tx as GLTransaction).narration}
+                            </div>
+                            <span className="font-mono font-semibold text-stone-800">
+                              {formatCurrency(
+                                Math.abs(section.type === 'BANK' ? (tx as BankTransaction).signedAmount : (tx as GLTransaction).amount),
+                                tx.currency
+                              )}
+                            </span>
+                          </div>
+                          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-stone-500">
+                            <span>{formatDate(tx.transactionDate)}</span>
+                            <span>Status: {tx.status}</span>
+                            {tx.referenceNumber && <span>Ref: {tx.referenceNumber}</span>}
+                            {section.type === 'GL' && (tx as GLTransaction).journalNumber && (
+                              <span>Journal: {(tx as GLTransaction).journalNumber}</span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              ))}
             </div>
           )}
         </div>
