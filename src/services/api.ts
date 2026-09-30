@@ -291,7 +291,24 @@ export const api = {
       body: JSON.stringify(data),
     }),
   getPeriodMatches: (periodId: string) =>
-    request<{ matches: ReconciliationMatch[]; bankTransactions: BankTransaction[]; glTransactions: GLTransaction[] }>(`/api/reconciliations/periods/${periodId}/matches`),
+    request<{
+      matches: ReconciliationMatch[];
+      bankTransactions: BankTransaction[];
+      glTransactions: GLTransaction[];
+      reviewCandidates: {
+        bankTransactionId: string;
+        glTransactionId: string;
+        eligible: boolean;
+        totalCriteriaSatisfied: number;
+        strongCriteriaSatisfied: number;
+        criteriaSatisfied: string[];
+        criteriaFailed: string[];
+        confidenceScore: number;
+        breakdown: Record<string, unknown>;
+        matchingRuleId?: string | null;
+        matchingRuleName?: string | null;
+      }[];
+    }>(`/api/reconciliations/periods/${periodId}/matches`),
   proposeAutoMatches: (periodId: string) =>
     request<{ success: boolean; count: number; matches: ReconciliationMatch[]; message: string }>(
       `/api/reconciliations/periods/${periodId}/propose-auto-matches`,
